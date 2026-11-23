@@ -1,8 +1,9 @@
 # tokidoki
 
 A personal assistant that remembers: an agent with durable execution and automatic long-term
-memory, as a Rust workspace. It ships as `tokidoki-serve`, the agent sidecar of
-[ternt](https://github.com/jonkarrer/ternt): one agent per ternt space.
+memory, as a Rust workspace. It ships as `tokidoki-serve`, a sidecar process another program
+runs (`docs/SIDECAR.md`). [ternt](https://github.com/jonkarrer/ternt) forked its own copy on
+2026-11-23 (`4d3b18b`) and develops it there; this repo goes its own way from here.
 
 ```bash
 nix develop --impure   # dev shell (from ~/devjon/configs): just, jq, tursodb, turso

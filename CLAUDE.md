@@ -1,5 +1,9 @@
 # Tokidoki
 
+> **Forked 2026-11-23.** Ternt took its own copy of this repo at `4d3b18b` (`tokidoki/` in the
+> ternt repo) and develops it there; this repo is the owner's own project from here on and grows
+> independently. Nothing is synced between the two. The ternt-specific notes below are history.
+
 A personal-assistant agent in Rust: durable execution and automatic long-term memory. It ships
 as `tokidoki-serve`, the agent sidecar of **ternt** (`~/devjon/projects/ternt`), one agent per
 ternt space. `docs/HANDOFF.md` is the long account of the design; `docs/SIDECAR.md` how the
