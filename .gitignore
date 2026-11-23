@@ -7,3 +7,5 @@
 *.db
 result
 node_modules/
+/app/dist/
+/e2e/.out/

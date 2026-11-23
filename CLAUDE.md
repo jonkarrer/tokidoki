@@ -3,7 +3,7 @@
 A personal-assistant agent in Rust: durable execution (work survives a crash and resumes) and
 automatic long-term memory (it learns from conversations without being told to). The owner's
 goal is "an alive agent that grows with the user". It is one library, `tokidoki::Tokidoki`:
-input in, output out. The next step is a standalone macOS app around it.
+input in, output out, and a macOS app around it (`app/`, Tauri v2 + Svelte 5).
 
 ## History worth knowing
 
@@ -13,10 +13,9 @@ input in, output out. The next step is a standalone macOS app around it.
   ternt-specific parts were removed here afterwards: the sidecar (`tokidoki-serve`), `Spaces`,
   per-space configuration, the space name told to new threads, and the handoff docs. They are
   in history at `ed91e80` if ever wanted.
-- A first standalone app (Tauri v2 + Svelte 5, signed and self-updating the way ternt is)
-  existed and was retired when ternt took over. It is in history at `8c807b5`: `app/`,
-  `scripts/publish.sh`, `scripts/release.sh`, `docs/RELEASING.md`. Its interface was never
-  seen running.
+- The app (signed and self-updating the way ternt is) was first built on 2026-11-21, retired
+  when ternt took over, and brought back on 2026-11-23 with a provider picker. Its release
+  pipeline (`scripts/publish.sh`, `docs/RELEASING.md`) has never run end to end.
 
 ## Standing decisions
 
@@ -53,4 +52,15 @@ just test      # all tests; `just test inference --live` hits real APIs
 just types     # regenerate crates/interface/protocol.ts
 just chat      # talk to a fresh agent in the terminal
 just inspect recent   # read what the agent did
+just app       # the app, with hot reload
+e2e/run.sh     # look at the app: runs e2e/tests/*.js in its page, pictures in e2e/.out/
 ```
+
+## Looking at the app
+
+There is no screen to capture from this shell, so the app photographs its own page:
+`e2e/run.sh <test>` starts the debug build on an empty data folder, runs the script with `t`
+(`app/src/lib/debug.ts`: `click`, `type`, `see`, `until`, `shot`, `check`) and writes
+`e2e/.out/<name>.png`, which can be read as images. After changing the interface, run a test
+and look at the pictures. A test that needs a model gets its key from Doppler:
+`doppler run --project ternt --config dev -- e2e/run.sh conversation` (cheapest models).
