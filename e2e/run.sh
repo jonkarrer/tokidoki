@@ -8,6 +8,8 @@
 # Each test starts from an empty data folder, e2e/.out/<name>.data, and the keys in the
 # environment (the Keychain is not read: TOKIDOKI_NO_KEYCHAIN). Output and pictures go to
 # e2e/.out/. A test that calls a model runs on the provider's cheapest (TOKIDOKI_MODELS=cheap).
+# A test's <name>.env is its own environment, one NAME=value a line; $HOME and the like are
+# filled in.
 setopt null_glob
 E2E=${0:A:h}
 ROOT=${E2E:h}
@@ -24,7 +26,7 @@ for name in $tests; do
   echo "== $name"
   rm -rf $OUT/$name.data $OUT/$name-*.png
   suite_env=()
-  [[ -f $E2E/tests/$name.env ]] && suite_env=(${(f)"$(<$E2E/tests/$name.env)"})
+  [[ -f $E2E/tests/$name.env ]] && suite_env=(${(e)${(f)"$(<$E2E/tests/$name.env)"}})
   env TOKIDOKI_MODELS=cheap $suite_env TOKIDOKI_TEST=$E2E/tests/$name.js TOKIDOKI_SHOTS=$OUT \
     TOKIDOKI_DATA=$OUT/$name.data TOKIDOKI_NO_KEYCHAIN=1 \
     $ROOT/target/debug/tokidoki-app > $OUT/$name.log 2>&1 &

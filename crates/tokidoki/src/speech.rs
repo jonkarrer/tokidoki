@@ -34,5 +34,12 @@ pub(crate) async fn listen(voice: Arc<Voice>, wav: Vec<u8>) -> Result<Heard> {
 /// A reply, read out in `language`, as WAV.
 pub(crate) async fn speak(voice: Arc<Voice>, reply: String, language: String) -> Result<Vec<u8>> {
     let text = voice::speakable(&reply);
+    // Nothing to read (it was all code, say): silence, not a model asked to say nothing.
+    if text.is_empty() {
+        return voice::write_wav(&voice::Audio {
+            samples: Vec::new(),
+            rate: 24_000,
+        });
+    }
     tokio::task::spawn_blocking(move || voice.speak(&text, &language, 1.0)).await?
 }

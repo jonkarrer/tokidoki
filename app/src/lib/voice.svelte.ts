@@ -24,10 +24,15 @@ export const voice = $state({
   language: "en",
   /** The reply being read out (its line's key). */
   playing: null as string | null,
+  /** Something said that couldn't be sent: the composer takes it, so it isn't lost. */
+  unsent: null as string | null,
   error: null as string | null,
 });
 
 let recording: Recording | null = null;
+/** The microphone was asked for and hasn't answered yet; `abandoned` when that was called off. */
+let starting = false;
+let abandoned = false;
 let started = false;
 
 /** Reads where the models stand, and follows it; reads replies out when talked to. */
@@ -38,7 +43,11 @@ export async function startVoice() {
     if (event.type === "voice") voice.status = event.status;
   });
   whenReplied((key, text) => {
-    if (voice.aloud) speak(key, text);
+    // Not over the user talking: the microphone would hear it as theirs.
+    if (!voice.aloud || starting || voice.recording || voice.hearing) return;
+    // One turn can bring several replies: each is read after the one before, not over it.
+    if (voice.playing !== null) waiting.push({ key, text });
+    else read(key, text);
   });
   voice.status = await core.voiceStatus().catch(() => null);
 }
@@ -78,7 +87,7 @@ export async function prepare() {
 /** Starts talking, or stops and sends what was said. */
 export async function toggleTalking() {
   if (voice.recording) return stopTalking();
-  if (voice.hearing) return;
+  if (voice.hearing || starting) return;
   if (!ready()) {
     voice.offering = true;
     return;
@@ -87,11 +96,18 @@ export async function toggleTalking() {
   voice.error = null;
   // Loads the models while the user talks, so hearing them doesn't wait for it.
   core.warmVoice().catch(() => {});
+  starting = true;
+  abandoned = false;
   try {
-    recording = await record((level) => (voice.level = level));
+    const begun = await record((level) => (voice.level = level));
+    // Called off while the microphone was being asked for.
+    if (abandoned) return begun.cancel();
+    recording = begun;
     voice.recording = true;
   } catch (problem) {
     voice.error = `The microphone isn't available: ${problem}`;
+  } finally {
+    starting = false;
   }
 }
 
@@ -106,9 +122,13 @@ async function stopTalking() {
   try {
     const heard = await core.listen(wav);
     if (!heard.text.trim()) return;
-    voice.language = heard.language;
+    // Replies are read in the language last said that it can speak.
+    if (heard.speakable) voice.language = heard.language;
     voice.aloud = heard.speakable;
-    await send(heard.text);
+    if (!(await send(heard.text))) {
+      voice.aloud = false;
+      voice.unsent = heard.text;
+    }
   } catch (problem) {
     voice.error = String(problem);
   } finally {
@@ -116,8 +136,9 @@ async function stopTalking() {
   }
 }
 
-/** Stops recording without sending. */
+/** Stops recording without sending, also when it was only about to start. */
 export function cancelTalking() {
+  if (starting) abandoned = true;
   recording?.cancel();
   recording = null;
   voice.recording = false;
@@ -129,26 +150,62 @@ export function typed() {
   voice.aloud = false;
 }
 
-let playing: { token: number; audio: HTMLAudioElement | null } = { token: 0, audio: null };
+/** Esc: calls off a recording, or else the reading out. */
+export function hush() {
+  if (voice.recording || starting) cancelTalking();
+  else stopSpeaking();
+}
 
-/** Reads `text` (a reply, Markdown) out, paragraph by paragraph: the next is made while the one
-    before plays, so a long reply starts as soon as its first paragraph is ready. */
-export async function speak(key: string, text: string) {
+let playing: { token: number; audio: HTMLAudioElement | null } = { token: 0, audio: null };
+/** Replies to read once the one being read is done. */
+let waiting: { key: string; text: string }[] = [];
+
+/** Reads `text` (a reply, Markdown) out now, in place of whatever was being read. */
+export function speak(key: string, text: string) {
   stopSpeaking();
+  return read(key, text);
+}
+
+/** `text` in the parts it is read in: its paragraphs, a code block whole however many blank
+    lines it has (the core leaves code out, and has to see where it starts and ends). */
+export function paragraphs(text: string): string[] {
+  const parts: string[] = [];
+  let part: string[] = [];
+  let code = false;
+  for (const line of text.split("\n")) {
+    if (line.trimStart().startsWith("```")) code = !code;
+    if (line.trim() || code) part.push(line);
+    else if (part.length) parts.push(part.splice(0).join("\n"));
+  }
+  if (part.length) parts.push(part.join("\n"));
+  return parts;
+}
+
+/** Reads `text` out, paragraph by paragraph: the next is made while the one before plays, so
+    a long reply starts as soon as its first paragraph is ready. */
+async function read(key: string, text: string) {
   const token = ++playing.token;
   voice.playing = key;
-  const paragraphs = text.split(/\n\s*\n/).filter((part) => part.trim());
-  const make = (part: string) => core.speak(part, voice.language).catch(() => null);
-  let next = make(paragraphs[0] ?? "");
+  const parts = paragraphs(text);
+  const make = (part: string) =>
+    core.speak(part, voice.language).catch((problem) => {
+      if (token === playing.token) voice.error = String(problem);
+      return null;
+    });
   try {
-    for (let i = 0; i < paragraphs.length; i++) {
+    let next = parts.length ? make(parts[0]) : null;
+    for (let i = 0; i < parts.length; i++) {
       const wav = await next;
       if (token !== playing.token) return;
-      if (i + 1 < paragraphs.length) next = make(paragraphs[i + 1]);
+      if (i + 1 < parts.length) next = make(parts[i + 1]);
       if (wav && wav.byteLength > 44) await play(wav, token);
     }
   } finally {
-    if (token === playing.token) voice.playing = null;
+    if (token === playing.token) {
+      voice.playing = null;
+      const then = waiting.shift();
+      if (then) read(then.key, then.text);
+    }
   }
 }
 
@@ -171,6 +228,7 @@ function play(wav: ArrayBuffer, token: number) {
 
 /** Stops reading out. */
 export function stopSpeaking() {
+  waiting = [];
   playing.token++;
   playing.audio?.pause();
   playing.audio = null;

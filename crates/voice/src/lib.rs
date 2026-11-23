@@ -9,6 +9,7 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use sherpa_rs::OnnxConfig;
@@ -85,8 +86,15 @@ pub struct Voice {
     listening: Mutex<Option<WhisperRecognizer>>,
     /// Kokoro, as loaded for one language: switching reloads it (each copy is 330 MB).
     speaking: Mutex<Option<(String, KokoroTts)>>,
-    fetching: Mutex<Vec<(Model, f32)>>,
 }
+
+/// The downloads under way, by where they unpack to, and how far each is (0–1). One list for
+/// the process: a second `Voice` on the same folder (the app makes one each time it reopens
+/// its core) sees a download the first started, and doesn't start it again over the same file.
+static FETCHING: Mutex<Vec<(PathBuf, f32)>> = Mutex::new(Vec::new());
+
+/// How often a `prepare` that found a download under way looks whether it is done.
+const FETCH_POLL: Duration = Duration::from_millis(250);
 
 /// The Kokoro voice (a speaker of its v1.0 table) and the language setting for each language
 /// it speaks: English from its own lexicon, the others through espeak. `None` for one it can't.
@@ -104,13 +112,47 @@ fn voice_for(language: &str) -> Option<(i32, &'static str)> {
 /// The rate Whisper hears at.
 const LISTENING_RATE: u32 = 16_000;
 
+/// A download claimed in `FETCHING`, given up when dropped.
+struct Claim(PathBuf);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        FETCHING.lock().unwrap().retain(|(path, _)| *path != self.0);
+    }
+}
+
+/// The most Whisper is given at once. It hears thirty seconds and drops the rest without a
+/// word (sherpa-onnx's offline Whisper), so anything longer is heard in pieces.
+const PIECE_SECONDS: usize = 28;
+/// How far back from that a piece may end, to end in a pause instead of a word.
+const PAUSE_SECONDS: usize = 8;
+
+/// `samples` (at `rate`) in pieces Whisper hears whole, each cut at the quietest tenth of a
+/// second near its end.
+fn pieces(samples: &[f32], rate: usize) -> Vec<&[f32]> {
+    let (most, back, frame) = (PIECE_SECONDS * rate, PAUSE_SECONDS * rate, rate / 10);
+    let mut pieces = Vec::new();
+    let mut rest = samples;
+    while rest.len() > most {
+        let loudness = |at: usize| rest[at..at + frame].iter().map(|s| s * s).sum::<f32>();
+        let quietest = (most - back..=most - frame)
+            .step_by(frame)
+            .min_by(|a, b| loudness(*a).total_cmp(&loudness(*b)))
+            .unwrap_or(most - frame);
+        let (piece, after) = rest.split_at(quietest + frame / 2);
+        pieces.push(piece);
+        rest = after;
+    }
+    pieces.push(rest);
+    pieces
+}
+
 impl Voice {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
             listening: Mutex::new(None),
             speaking: Mutex::new(None),
-            fetching: Mutex::new(Vec::new()),
         }
     }
 
@@ -119,13 +161,8 @@ impl Voice {
     }
 
     pub fn state(&self, model: Model) -> State {
-        if let Some((_, done)) = self
-            .fetching
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(m, _)| *m == model)
-        {
+        let path = self.path(model);
+        if let Some((_, done)) = FETCHING.lock().unwrap().iter().find(|(p, _)| *p == path) {
             return State::Fetching(*done);
         }
         match self.path(model).join(model.marker()).exists() {
@@ -135,18 +172,37 @@ impl Voice {
     }
 
     /// Downloads and unpacks what is missing, calling `progress` with each model and how far
-    /// along it is (0–1). Slow: minutes on a slow connection.
+    /// along it is (0–1), and returns when both are ready. Slow: minutes on a slow connection.
+    /// A model someone else is already downloading is waited for, not downloaded twice.
     pub async fn prepare(&self, progress: impl Fn(Model, f32)) -> Result<()> {
         for model in Model::ALL {
-            if self.state(model) != State::Missing {
-                continue;
+            loop {
+                match self.state(model) {
+                    State::Ready => break,
+                    State::Fetching(_) => tokio::time::sleep(FETCH_POLL).await,
+                    // Lost to another caller between looking and claiming: look again.
+                    State::Missing if !self.claim(model) => {}
+                    State::Missing => {
+                        // Released however this ends, also when the caller stops waiting.
+                        let _claimed = Claim(self.path(model));
+                        (self.fetch(model, &progress).await)
+                            .with_context(|| format!("fetching the {model:?} model"))?;
+                    }
+                }
             }
-            self.fetching.lock().unwrap().push((model, 0.0));
-            let fetched = self.fetch(model, &progress).await;
-            self.fetching.lock().unwrap().retain(|(m, _)| *m != model);
-            fetched.with_context(|| format!("fetching the {model:?} model"))?;
         }
         Ok(())
+    }
+
+    /// Marks `model` as being downloaded by this caller, unless it already is by another.
+    fn claim(&self, model: Model) -> bool {
+        let path = self.path(model);
+        let mut fetching = FETCHING.lock().unwrap();
+        if fetching.iter().any(|(p, _)| *p == path) {
+            return false;
+        }
+        fetching.push((path, 0.0));
+        true
     }
 
     async fn fetch(&self, model: Model, progress: &impl Fn(Model, f32)) -> Result<()> {
@@ -176,8 +232,9 @@ impl Voice {
     }
 
     fn set_progress(&self, model: Model, done: f32) {
-        let mut fetching = self.fetching.lock().unwrap();
-        if let Some(entry) = fetching.iter_mut().find(|(m, _)| *m == model) {
+        let path = self.path(model);
+        let mut fetching = FETCHING.lock().unwrap();
+        if let Some(entry) = fetching.iter_mut().find(|(p, _)| *p == path) {
             entry.1 = done;
         }
     }
@@ -206,12 +263,21 @@ impl Voice {
             *listening = Some(self.load_listening()?);
         }
         let started = std::time::Instant::now();
-        let result = (listening.as_mut().unwrap()).transcribe(LISTENING_RATE, &samples);
-        let text = result.text.trim().to_string();
-        let language = result
-            .lang
-            .trim_matches(|c| c == '<' || c == '>' || c == '|')
-            .to_string();
+        let whisper = listening.as_mut().unwrap();
+        let mut said = Vec::new();
+        // The language of the whole is the language of how it starts.
+        let mut language = None;
+        for piece in pieces(&samples, LISTENING_RATE as usize) {
+            let result = whisper.transcribe(LISTENING_RATE, piece);
+            language.get_or_insert_with(|| {
+                (result.lang)
+                    .trim_matches(|c| c == '<' || c == '>' || c == '|')
+                    .to_string()
+            });
+            said.push(result.text.trim().to_string());
+        }
+        said.retain(|text| !text.is_empty());
+        let (text, language) = (said.join(" "), language.unwrap_or_default());
         tracing::info!(
             seconds = samples.len() as f32 / LISTENING_RATE as f32,
             ms = started.elapsed().as_millis() as u64,
@@ -447,6 +513,40 @@ mod tests {
         let one_second = vec![0.0; 24_000];
         assert_eq!(resample(&one_second, 24_000, 16_000).len(), 16_000);
         assert_eq!(resample(&one_second, 16_000, 16_000).len(), 24_000);
+    }
+
+    /// A long recording is heard in pieces of under thirty seconds, none of it left out, each
+    /// ending in the pause nearest its end.
+    #[test]
+    fn a_long_recording_is_heard_in_pieces() {
+        let rate = 100;
+        // Seventy seconds of talk, silent in the 24th second and the 50th.
+        let mut samples = vec![0.5; 70 * rate];
+        samples[23 * rate..24 * rate].fill(0.0);
+        samples[49 * rate..50 * rate].fill(0.0);
+        let pieces = pieces(&samples, rate);
+        let lengths: Vec<usize> = pieces.iter().map(|p| p.len()).collect();
+        assert_eq!(lengths.iter().sum::<usize>(), samples.len());
+        assert!(lengths.iter().all(|n| *n <= PIECE_SECONDS * rate));
+        assert_eq!(lengths.len(), 3);
+        // Each cut falls in a silence.
+        assert!((23 * rate..24 * rate).contains(&lengths[0]));
+        assert!((49 * rate..50 * rate).contains(&(lengths[0] + lengths[1])));
+        assert_eq!(super::pieces(&samples[..10 * rate], rate).len(), 1);
+    }
+
+    /// A download under way is seen by another `Voice` on the same folder, which doesn't
+    /// start it again.
+    #[test]
+    fn a_download_is_claimed_once_for_a_folder() {
+        let dir = std::env::temp_dir().join("tokidoki-voice-claimed");
+        let (one, other) = (Voice::new(&dir), Voice::new(&dir));
+        assert!(one.claim(Model::Listening));
+        let claimed = Claim(one.path(Model::Listening));
+        assert_eq!(other.state(Model::Listening), State::Fetching(0.0));
+        assert!(!other.claim(Model::Listening));
+        drop(claimed);
+        assert_eq!(other.state(Model::Listening), State::Missing);
     }
 
     #[test]

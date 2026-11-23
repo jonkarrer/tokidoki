@@ -275,12 +275,20 @@ impl Tool for ReadPage {
 
 /// A title for a brief that came without one: its first sentence, cut short.
 fn first_sentence(task: &str) -> String {
-    let sentence = task
-        .trim()
-        .split_inclusive(['.', '?', '!', '\n'])
-        .next()
-        .unwrap_or(task);
-    let sentence = sentence.trim().trim_end_matches('.');
+    // A sentence ends at a mark with a space after it: not inside "Node.js" or "1.2".
+    let task = task.trim();
+    let end = task
+        .char_indices()
+        .find(|&(at, c)| {
+            c == '\n'
+                || (matches!(c, '.' | '?' | '!')
+                    && task[at + 1..]
+                        .chars()
+                        .next()
+                        .is_none_or(char::is_whitespace))
+        })
+        .map_or(task.len(), |(at, c)| at + c.len_utf8());
+    let sentence = task[..end].trim().trim_end_matches('.');
     match sentence.char_indices().nth(TITLE_CHARS) {
         Some((cut, _)) => format!("{}…", sentence[..cut].trim_end()),
         None => sentence.to_string(),
@@ -361,5 +369,28 @@ pub(crate) fn shown(worker: Worker) -> interface::Worker {
             agent::Delivery::Delivered => D::Delivered,
             agent::Delivery::Held => D::Held,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_title_from_a_brief_is_its_first_sentence() {
+        for (task, title) in [
+            (
+                "Compare Node.js 22 and Bun 1.2 startup times. Use recent benchmarks.",
+                "Compare Node.js 22 and Bun 1.2 startup times",
+            ),
+            (
+                "Is Lisbon bigger than Porto? Give numbers.",
+                "Is Lisbon bigger than Porto?",
+            ),
+            ("Find flights\nto Tokyo", "Find flights"),
+            ("Population of Lisbon", "Population of Lisbon"),
+        ] {
+            assert_eq!(first_sentence(task), title);
+        }
     }
 }

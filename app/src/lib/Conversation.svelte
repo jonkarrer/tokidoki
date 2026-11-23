@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import Lines from "./Lines.svelte";
   import { render } from "./markdown";
   import Presence from "./Presence.svelte";
   import {
     cancelTalking,
     downloaded,
+    hush,
     prepare,
-    stopSpeaking,
     toDownload,
     toggleTalking,
     typed,
@@ -126,12 +126,21 @@
   function onwindowkeydown(event: KeyboardEvent) {
     if (event.altKey && event.code === "Space" && voice.status) {
       event.preventDefault();
-      toggleTalking();
-    } else if (event.key === "Escape") {
-      if (voice.recording) cancelTalking();
-      else stopSpeaking();
-    }
+      // Held down, the key repeats: one press is one start or stop.
+      if (!event.repeat) toggleTalking();
+    } else if (event.key === "Escape") hush();
   }
+
+  // The talking is done here: leaving for another view calls a recording off, so the
+  // microphone isn't left on where nothing shows it and no key stops it.
+  onDestroy(cancelTalking);
+
+  // Something said that couldn't be sent is kept as the draft.
+  $effect(() => {
+    if (voice.unsent === null) return;
+    draft = [draft.trim(), voice.unsent].filter(Boolean).join(" ");
+    voice.unsent = null;
+  });
 </script>
 
 <svelte:window onkeydown={onwindowkeydown} />
