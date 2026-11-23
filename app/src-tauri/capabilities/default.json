@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The one window: events, and dragging it by the title bar area.",
+  "description": "The one window: events, dragging it by the title bar area, and opening links (a reply's, a report's sources) in the browser.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "opener:allow-open-url"]
 }

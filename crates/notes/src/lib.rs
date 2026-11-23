@@ -142,7 +142,7 @@ impl Notes {
         {
             return Ok(note);
         }
-        let now = now();
+        let now = stamp(&tx)?;
         tx.execute(
             "INSERT INTO notes (title, body, tags, project, people, thread, origin, created_at,
                  updated_at)
@@ -173,14 +173,14 @@ impl Notes {
         let draft = tidy(draft)?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let Some(before) = tx
-            .query_row("SELECT * FROM notes WHERE id = ?1", [id], note_from)
+        if tx
+            .query_row("SELECT 1 FROM notes WHERE id = ?1", [id], |_| Ok(()))
             .optional()?
-        else {
+            .is_none()
+        {
             bail!("note {id} is gone");
-        };
-        // Always later than before, so "most recently changed" holds within a millisecond.
-        let now = now().max(before.updated_at + 1);
+        }
+        let now = stamp(&tx)?;
         tx.execute(
             "UPDATE notes SET title = ?2, body = ?3, tags = ?4, project = ?5, people = ?6,
                  updated_at = ?7
@@ -340,6 +340,14 @@ fn note_from(row: &Row) -> rusqlite::Result<Note> {
         created_at: row.get::<_, i64>("created_at")? as u64,
         updated_at: row.get::<_, i64>("updated_at")? as u64,
     })
+}
+
+/// The time a change is saved at: now, or just after the latest change if that is later (two
+/// in one millisecond), so "most recently changed" always has one answer.
+fn stamp(tx: &rusqlite::Transaction) -> Result<u64> {
+    let latest: Option<i64> =
+        tx.query_row("SELECT MAX(updated_at) FROM notes", [], |row| row.get(0))?;
+    Ok(now().max(latest.map_or(0, |at| at as u64 + 1)))
 }
 
 fn now() -> u64 {

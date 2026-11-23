@@ -33,6 +33,18 @@
     <p class="aside">Used {line.name}</p>
   {:else if line.kind === "compacted"}
     <p class="aside rule">Earlier messages are summarized from here</p>
+  {:else if line.kind === "report"}
+    {@const held = app.workers.find((w) => w.id === line.report.worker)?.delivery === "held"}
+    <details class="report" class:failed={line.report.status !== "done"}>
+      <summary>
+        <span class="what"
+          >{line.report.status === "done" ? "Research came back" : "Research couldn't be done"}{#if held}{" · kept for when you come back to it"}{/if}</span
+        >
+        <span class="task">{line.report.task}</span>
+      </summary>
+      <!-- eslint-disable-next-line svelte/no-at-html-tags (sanitized in render) -->
+      <div class="reply selectable">{@html render(line.report.body)}</div>
+    </details>
   {/if}
 {/each}
 
@@ -89,5 +101,55 @@
   .rule {
     padding-bottom: 10px;
     border-bottom: 1px solid var(--line);
+  }
+  /* What a worker brought back: indigo, like what Tokidoki does; opened for the whole report. */
+  .report {
+    margin: 14px 0;
+    border: 1px solid color-mix(in srgb, var(--indigo) 45%, transparent);
+    border-radius: 10px;
+  }
+  .report summary {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 8px 12px;
+    list-style: none;
+    cursor: default;
+  }
+  .report summary::-webkit-details-marker {
+    display: none;
+  }
+  .report summary:hover {
+    background: color-mix(in srgb, var(--indigo) 7%, transparent);
+  }
+  .report .what {
+    color: var(--indigo);
+    font-size: 12.5px;
+    font-weight: 650;
+  }
+  .report .what::after {
+    content: " ›";
+  }
+  .report[open] .what::after {
+    content: " ⌄";
+  }
+  .report .task {
+    color: var(--muted);
+    font-size: 13px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .report .reply {
+    padding: 4px 14px 14px;
+    font-size: 15px;
+  }
+  .report.failed {
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  }
+  .report.failed .what {
+    color: var(--danger);
   }
 </style>

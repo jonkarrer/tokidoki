@@ -295,6 +295,8 @@ pub enum Event {
     Memory { change: MemoryChange },
     /// A note was saved, changed or deleted: by the user, or by the model when asked.
     Note { change: NoteChange },
+    /// A worker started, ended, or had its report delivered or held.
+    Worker { worker: Worker },
     /// Events were missed (the client fell behind): re-read what it shows.
     Lagged,
 }
@@ -415,6 +417,49 @@ pub enum NoteChange {
     Deleted {
         id: i64,
     },
+}
+
+/// Work the model handed to a worker, which runs on its own and reports back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Worker {
+    /// Like `worker-3`: its own thread, kept out of the conversation.
+    pub id: String,
+    /// The thread that asked for it.
+    pub parent: String,
+    /// What kind of worker: `research`.
+    pub kind: String,
+    /// What it was asked to do.
+    pub task: String,
+    pub status: WorkerStatus,
+    /// Ms since the epoch.
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    /// What it found (Markdown), or why it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+    /// What became of the report: told to the user now, or kept for when they come back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatus {
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    Delivered,
+    Held,
 }
 
 /// What a reply grew by.

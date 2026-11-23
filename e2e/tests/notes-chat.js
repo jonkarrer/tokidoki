@@ -1,9 +1,11 @@
 // With a key: asked in a conversation, Tokidoki saves a note (it shows in Notes, linked to
 // the conversation) and later answers from it. Calls a model (the provider's cheapest).
 const ask = async (text) => {
+  // Done when a new reply is in and nothing is being answered: earlier replies don't count.
+  const replies = document.querySelectorAll(".reply").length;
   await t.type(".composer textarea", text);
   await t.click(".composer .send");
-  await t.until("the answer to end", () => !document.querySelector(".composer .stop") && document.querySelectorAll(".reply").length, 90000);
+  await t.until("the answer to end", () => !document.querySelector(".composer .stop") && document.querySelectorAll(".reply").length > replies, 90000);
 };
 await t.see(".composer textarea");
 await ask("Save these notes: plumber coming Tuesday 9am, fix kitchen sink, costs 80 euros, call Marco if late");

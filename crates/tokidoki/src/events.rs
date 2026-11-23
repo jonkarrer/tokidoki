@@ -102,6 +102,10 @@ fn read(committed: &engine::Committed) -> Vec<Event> {
         if let Some(submission) = agent::submission_in(key, value.as_ref()) {
             events.push(Event::Submission { submission });
         }
+        if let Some(worker) = agent::worker_in(key, value.as_ref()) {
+            let worker = crate::worker_tools::shown(worker);
+            events.push(Event::Worker { worker });
+        }
     }
     events
 }

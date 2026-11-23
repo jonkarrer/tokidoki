@@ -15,24 +15,28 @@ pub const RESUME_HANDOFF: &str =
     "Where this conversation left off (it went quiet for a while; pick it up from here):";
 
 impl<A: Api> Experience<A> {
-    /// Writes the thread's resume card and resets its context to it. `None` when nothing
-    /// finished since the last card.
+    /// Writes the thread's resume card (with Jev, only when the turns since the last one change
+    /// it) and resets its context to it. `None` when nothing finished since the last card.
     #[tracing::instrument(skip_all)]
     pub async fn settle(&self, thread: &mut Thread) -> Result<Option<Resume>> {
         ensure!(!thread.in_turn(), "can't settle during a turn");
         let previous = self.memory.resume(&thread.id)?;
         let previous = previous.as_ref().map(|r| (r.text.as_str(), r.to));
-        let Some((end, input)) = card_input(thread, previous, "Previous card", RESUME_INPUT_CHARS)
-        else {
+        let Some(card) = card_input(thread, previous, "Previous card", RESUME_INPUT_CHARS) else {
             return Ok(None);
         };
+        let end = card.end;
         let checkpoints = &thread.checkpoints()[..=end];
         let active_at = checkpoints
             .iter()
             .rev()
             .find(|c| matches!(c.event, Event::Message(_)))
             .map_or(checkpoints[end].at, |c| c.at);
-        let text = self.ask(RESUME_PROMPT, input).await?;
+        // With Jev, a card the turns since haven't changed is kept, not rewritten.
+        let text = match previous {
+            Some((text, _)) if self.still_holds(text, &card.since).await => text.to_string(),
+            _ => self.ask(RESUME_PROMPT, card.input).await?,
+        };
         let resume = self.memory.add_resume(
             &thread.id,
             self.scopes.write.clone(),

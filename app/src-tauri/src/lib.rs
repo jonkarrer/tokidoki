@@ -21,7 +21,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tokidoki::interface::{
     Event, Feedback, Input, Memory, Note, NoteDraft, NoteSearch, Sent, Speaker, ThreadSummary,
-    WhenBusy,
+    WhenBusy, Worker,
 };
 use tokidoki::{Config, Tokidoki, Tools, Vendor};
 
@@ -107,6 +107,10 @@ fn open(app: &AppHandle) -> anyhow::Result<bool> {
     if let Some(model) = settings.model.filter(|model| !model.is_empty()) {
         config.model = model;
     }
+    // With a TypeSafe key, Jev files messages into threads, before the model would.
+    config.jev_key = keys::jev()?;
+    // With an Exa key, research can be handed to workers that search the web.
+    config.exa_key = keys::exa()?;
     // Development: `TOKIDOKI_MODELS=cheap`, or a model by name.
     let config = config.with_models_from_env();
     let tokidoki = match key {
@@ -173,6 +177,10 @@ struct Chosen {
     /// The model the user named, if not the provider's usual.
     model: Option<String>,
     providers: Vec<ProviderChoice>,
+    /// Whether the user has given a TypeSafe key, for Jev: never the key itself.
+    has_jev_key: bool,
+    /// Whether the user has given an Exa key, for research workers.
+    has_exa_key: bool,
 }
 
 #[tauri::command]
@@ -192,19 +200,31 @@ fn chosen(app: AppHandle) -> Said<Chosen> {
         provider: settings.provider().id(),
         model: settings.model.clone(),
         providers: providers.collect::<anyhow::Result<_>>().map_err(say)?,
+        has_jev_key: keys::jev().map_err(say)?.is_some(),
+        has_exa_key: keys::exa().map_err(say)?.is_some(),
     })
 }
 
 /// Sets whose models Tokidoki runs on: checks `key` with the provider and stores it in the
 /// Keychain (`None` keeps the key there is), remembers the choice, and starts the core over
-/// with it. `model` names the model that answers; empty for the provider's usual.
+/// with it. `model` names the model that answers; empty for the provider's usual. `jev_key`,
+/// checked and stored the same way, lets Jev make the quick decisions, and `exa_key`, stored, lets
+/// research go to workers (`None` keeps the one there is, if any).
 #[tauri::command]
 async fn choose(
     app: AppHandle,
     provider: String,
     key: Option<String>,
     model: Option<String>,
+    jev_key: Option<String>,
+    exa_key: Option<String>,
 ) -> Said<Status> {
+    let jev_key = jev_key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty());
+    if let Some(jev_key) = &jev_key {
+        check_jev_key(jev_key).await?;
+    }
     let provider: Vendor = provider.parse().map_err(say)?;
     let key = key
         .map(|key| key.trim().to_string())
@@ -221,6 +241,16 @@ async fn choose(
     }
     if let Some(key) = &key {
         keys::set(provider, key).map_err(say)?;
+    }
+    if let Some(jev_key) = &jev_key {
+        keys::set_jev(jev_key).map_err(say)?;
+    }
+    // Exa has no free way to check a key: a wrong one shows as a research worker that fails.
+    if let Some(exa_key) = exa_key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+    {
+        keys::set_exa(&exa_key).map_err(say)?;
     }
     let settings = Settings {
         provider: Some(provider.id().into()),
@@ -263,6 +293,22 @@ async fn check_key(provider: Vendor, key: &str) -> Said<()> {
         Err(_) => Err(format!(
             "Couldn't reach {name} to check the key. Check your connection."
         )),
+    }
+}
+
+/// Asks TypeSafe whether it takes `key`, as `check_key` asks a provider.
+async fn check_jev_key(key: &str) -> Said<()> {
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/models", jev::BASE_URL))
+        .bearer_auth(key)
+        .send()
+        .await;
+    match response.map(|response| response.status().as_u16()) {
+        Ok(401 | 403) => {
+            Err("TypeSafe didn't accept that key. Check it and paste it again.".into())
+        }
+        Ok(_) => Ok(()),
+        Err(_) => Err("Couldn't reach TypeSafe to check the key. Check your connection.".into()),
     }
 }
 
@@ -369,6 +415,20 @@ fn delete_note(app: AppHandle, id: i64) -> Said<()> {
     core(&app)?.delete_note(&Speaker::owner(), id).map_err(say)
 }
 
+/// Every worker there has been, latest first.
+#[tauri::command]
+fn workers(app: AppHandle) -> Said<Vec<Worker>> {
+    core(&app)?.workers(&Speaker::owner()).map_err(say)
+}
+
+/// Stops the worker `id`. Returns whether it was running.
+#[tauri::command]
+fn cancel_worker(app: AppHandle, id: String) -> Said<bool> {
+    core(&app)?
+        .cancel_worker(&Speaker::owner(), &id)
+        .map_err(say)
+}
+
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -377,7 +437,8 @@ fn show_window(app: &AppHandle) {
 }
 
 pub fn run() {
-    let builder = tauri::Builder::default();
+    // Links (a reply's, a report's sources) open in the browser, not in this window.
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
     // One core per data folder: a second launch brings the first forward instead. Not in
     // development, whose data is its own, so `just app` runs beside the installed app.
     #[cfg(not(debug_assertions))]
@@ -417,6 +478,8 @@ pub fn run() {
             notes,
             write_note,
             delete_note,
+            workers,
+            cancel_worker,
             updater::update_status,
             updater::check_for_updates,
             updater::install_update,

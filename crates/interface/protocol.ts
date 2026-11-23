@@ -113,7 +113,7 @@ export type Event = { "type": "checkpoint", thread: string, seq: number,
 /**
  * Ms since the epoch.
  */
-at: number, turn: number, change: Change, } | { "type": "submission", submission: Submission, } | { "type": "activity", thread: string, doing: Doing, } | { "type": "delta", thread: string, delta: Delta, } | { "type": "memory", change: MemoryChange, } | { "type": "note", change: NoteChange, } | { "type": "lagged" };
+at: number, turn: number, change: Change, } | { "type": "submission", submission: Submission, } | { "type": "activity", thread: string, doing: Doing, } | { "type": "delta", thread: string, delta: Delta, } | { "type": "memory", change: MemoryChange, } | { "type": "note", change: NoteChange, } | { "type": "worker", worker: Worker, } | { "type": "lagged" };
 
 /**
  * Something tokidoki remembers, across every thread.
@@ -177,6 +177,43 @@ export type NoteDraft = { title: string, body: string, tags: Array<string>, proj
 export type NoteSearch = { query: string, tag: string | null, project: string | null, };
 
 export type NoteChange = { "kind": "saved", note: Note, } | { "kind": "deleted", id: number, };
+
+/**
+ * Work the model handed to a worker, which runs on its own and reports back.
+ */
+export type Worker = { 
+/**
+ * Like `worker-3`: its own thread, kept out of the conversation.
+ */
+id: string, 
+/**
+ * The thread that asked for it.
+ */
+parent: string, 
+/**
+ * What kind of worker: `research`.
+ */
+kind: string, 
+/**
+ * What it was asked to do.
+ */
+task: string, status: WorkerStatus, 
+/**
+ * Ms since the epoch.
+ */
+started_at: number, ended_at?: number | null, 
+/**
+ * What it found (Markdown), or why it failed.
+ */
+report?: string | null, 
+/**
+ * What became of the report: told to the user now, or kept for when they come back to it.
+ */
+delivery?: Delivery | null, };
+
+export type WorkerStatus = "running" | "done" | "failed" | "cancelled";
+
+export type Delivery = "delivered" | "held";
 
 /**
  * What a reply grew by.

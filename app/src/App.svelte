@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import { core } from "./lib/core";
   import Conversation from "./lib/Conversation.svelte";
@@ -18,6 +19,16 @@
       if (import.meta.env.DEV) (await import("./lib/debug")).startDebug();
     });
     core.version().then((v) => (version = v));
+    // A link (in a reply, a report's sources, a note) opens in the browser, never in this window.
+    const open = (event: MouseEvent) => {
+      const link = (event.target as Element | null)?.closest?.("a[href]");
+      const href = link?.getAttribute("href") ?? "";
+      if (!/^(https?:|mailto:)/i.test(href)) return;
+      event.preventDefault();
+      openUrl(href);
+    };
+    document.addEventListener("click", open);
+    return () => document.removeEventListener("click", open);
   });
 
   // What Tokidoki is doing in the conversation, shown beside it from anywhere in the app.
@@ -93,11 +104,15 @@
 {/if}
 
 <style>
+  /* Centred while it fits; scrolls from the top when it doesn't (the key form on a short window). */
   .center {
     height: 100%;
-    display: grid;
-    place-items: center;
+    display: flex;
+    overflow-y: auto;
     padding: 40px;
+  }
+  .center > :global(*) {
+    margin: auto;
   }
   .failed {
     max-width: 460px;

@@ -1374,3 +1374,166 @@ fn activity_follows_the_tasks_own_states() {
     };
     assert_eq!(doing(&waiting), None);
 }
+
+/// Says yes to every report.
+struct Interrupt;
+
+impl Review for Interrupt {
+    fn deliver<'a>(&'a self, _: &'a Worker, _: &'a [String]) -> ReviewFuture<'a> {
+        Box::pin(async { true })
+    }
+}
+
+/// An agent with research workers, and a `review` for reports the rule would hold.
+fn with_workers(script: &Arc<Script>, review: Option<Arc<dyn Review>>) -> Agent {
+    let mut registry = Registry::new();
+    register_with_review(
+        &mut registry,
+        script.clone(),
+        Tools::new(),
+        None,
+        fast(),
+        Live::default(),
+        review,
+    );
+    let engine = Engine::open(store(), registry, EngineSettings::default()).unwrap();
+    engine.resume();
+    let research = ThreadSetup {
+        system: Some("Research it.".into()),
+        tools: Vec::new(),
+    };
+    let kinds = HashMap::from([("research".to_string(), research)]);
+    Agent::new(engine, ThreadSetup::default()).with_workers(kinds)
+}
+
+fn worker(agent: &Agent, id: &str) -> Worker {
+    let all = agent.workers().unwrap();
+    all.into_iter().find(|w| w.id == id).unwrap()
+}
+
+/// The user is still in the thread that asked: the report is given to it as an input, so the
+/// model tells the user. A call run again finds its worker; a second in the turn is refused.
+#[tokio::test]
+async fn a_workers_report_is_delivered_while_the_user_is_still_there() {
+    let script = Script::new(vec![
+        Reply::Text("On it."),
+        Reply::Text("X is 42."),
+        Reply::Text("The worker found X is 42."),
+    ]);
+    let agent = with_workers(&script, None);
+    let id = agent.submit("t1", input("Find X")).unwrap();
+    settled(&agent, &id).await;
+
+    let started = agent
+        .delegate("t1", "call-1", "research", "Find X")
+        .unwrap();
+    assert!(is_worker(&started.id));
+    assert_eq!(
+        agent
+            .delegate("t1", "call-1", "research", "Find X")
+            .unwrap()
+            .id,
+        started.id
+    );
+    let again = agent
+        .delegate("t1", "call-2", "research", "Find X again")
+        .unwrap_err();
+    assert!(again.to_string().contains("already"), "{again}");
+
+    eventually(|| worker(&agent, &started.id).delivery == Some(Delivery::Delivered)).await;
+    let done = worker(&agent, &started.id);
+    assert_eq!(done.status, WorkerStatus::Done);
+    assert_eq!(done.report.as_deref(), Some("X is 42."));
+    eventually(|| {
+        transcript(&agent, "t1")
+            .last()
+            .unwrap()
+            .contains("The worker found X is 42.")
+    })
+    .await;
+    let lines = transcript(&agent, "t1");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("User: <worker-report") && l.contains("X is 42.")),
+        "{lines:#?}"
+    );
+    // A worker's thread has no idle time: nothing waits on it to dream.
+    assert!(
+        !agent
+            .engine()
+            .live_tasks()
+            .iter()
+            .any(|t| is_worker(&t.thread))
+    );
+}
+
+/// The user moved on: the report is held in the thread's context for when they come back,
+/// without a turn. Unless a review finds it worth interrupting them for.
+#[tokio::test]
+async fn a_workers_report_waits_once_the_user_has_moved_on() {
+    for (review, expected) in [
+        (None, Delivery::Held),
+        (
+            Some(Arc::new(Interrupt) as Arc<dyn Review>),
+            Delivery::Delivered,
+        ),
+    ] {
+        let script = Script::new(vec![
+            Reply::Text("On it."),
+            Reply::Text("Sure."),
+            Reply::Text("X is 42."),
+            Reply::Text("By the way, X is 42."),
+        ]);
+        let agent = with_workers(&script, review);
+        let id = agent.submit("t1", input("Find X")).unwrap();
+        settled(&agent, &id).await;
+        let turns = agent.engine().thread("t1", |t| t.turn()).unwrap();
+        let id = agent.submit("t2", input("Something else")).unwrap();
+        settled(&agent, &id).await;
+
+        let started = agent
+            .delegate("t1", "call-1", "research", "Find X")
+            .unwrap();
+        eventually(|| worker(&agent, &started.id).delivery == Some(expected)).await;
+        let lines = transcript(&agent, "t1");
+        match expected {
+            Delivery::Held => {
+                assert!(
+                    lines.last().unwrap().starts_with("User: <worker-report"),
+                    "{lines:#?}"
+                );
+                assert_eq!(agent.engine().thread("t1", |t| t.turn()).unwrap(), turns);
+            }
+            Delivery::Delivered => {
+                eventually(|| {
+                    transcript(&agent, "t1")
+                        .last()
+                        .unwrap()
+                        .contains("By the way")
+                })
+                .await;
+            }
+        }
+    }
+}
+
+/// A worker stopped before it finishes sends no report.
+#[tokio::test]
+async fn a_cancelled_worker_reports_nothing() {
+    let script = Script::new(vec![Reply::Text("On it."), Reply::Hang]);
+    let agent = with_workers(&script, None);
+    let id = agent.submit("t1", input("Find X")).unwrap();
+    settled(&agent, &id).await;
+    let started = agent
+        .delegate("t1", "call-1", "research", "Find X")
+        .unwrap();
+    eventually(|| script.seen().len() == 2).await;
+
+    assert!(agent.cancel_worker(&started.id).unwrap());
+    eventually(|| worker(&agent, &started.id).status == WorkerStatus::Cancelled).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let stopped = worker(&agent, &started.id);
+    assert_eq!((stopped.report, stopped.delivery), (None, None));
+    assert!(agent.cancel_worker("t1").is_err());
+}

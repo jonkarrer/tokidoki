@@ -518,7 +518,7 @@ fn checkpoint_line(checkpoint: &Checkpoint) -> String {
         Event::Replaced { range, with } => {
             format!("replaced messages {range:?} with {} message(s)", with.len())
         }
-        Event::Considered { upto, recalled } => {
+        Event::Considered { upto, recalled, .. } => {
             let texts: Vec<String> = recalled
                 .iter()
                 .map(|r| format!("m{}: {}", r.id, clip(&r.text, 80)))

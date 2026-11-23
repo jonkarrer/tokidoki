@@ -22,11 +22,15 @@ mod idle;
 mod inbox;
 mod live;
 mod tool;
+mod workers;
 
 pub use generation::Generation;
 pub use idle::Idle;
 pub use live::{Live, Shown};
 pub use tool::{ToolCall, ToolCallInput, ToolOutput};
+pub use workers::{
+    Delivery, REPORT_OPEN, Report, Review, ReviewFuture, Worker, WorkerStatus, is_worker, worker_in,
+};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -130,6 +134,12 @@ impl Tools {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.by_name.get(name).cloned()
+    }
+
+    /// Adds every tool in `other`.
+    pub fn extend(&mut self, other: Tools) -> &mut Self {
+        self.by_name.extend(other.by_name);
+        self
     }
 
     /// Every tool's spec, by name.
@@ -269,7 +279,26 @@ pub fn register<M: Model>(
     registry
         .register(Generation::new(model, mind.clone(), settings.clone(), live))
         .register(ToolCall::new(tools))
-        .register(Idle::new(mind, settings));
+        .register(Idle::new(mind, settings.clone()))
+        .register(Report::new(None, settings));
+}
+
+/// `register`, with a `Review` that decides whether a worker's report is worth interrupting the
+/// user for when the rule says to hold it.
+pub fn register_with_review<M: Model>(
+    registry: &mut Registry,
+    model: Arc<M>,
+    tools: Tools,
+    mind: Option<Arc<dyn Mind>>,
+    settings: Settings,
+    live: Live,
+    review: Option<Arc<dyn Review>>,
+) {
+    registry
+        .register(Generation::new(model, mind.clone(), settings.clone(), live))
+        .register(ToolCall::new(tools))
+        .register(Idle::new(mind, settings.clone()))
+        .register(Report::new(review, settings));
 }
 
 /// One of a mind's jobs: `Mind::consider`, `Mind::dream` or `Mind::settle`.
@@ -355,7 +384,7 @@ pub(crate) struct Record {
     pub run: Option<TaskId>,
 }
 
-const LAST_THREAD: &str = "agent/last-thread";
+pub(crate) const LAST_THREAD: &str = "agent/last-thread";
 
 /// How a run settles its inputs.
 #[derive(Debug, Clone, PartialEq)]
@@ -377,6 +406,8 @@ impl Settled {
 pub struct Agent {
     engine: Engine,
     setup: Arc<ThreadSetup>,
+    /// What each kind of worker runs with, by kind.
+    workers: Arc<HashMap<String, ThreadSetup>>,
 }
 
 impl Agent {
@@ -385,7 +416,37 @@ impl Agent {
         Self {
             engine,
             setup: Arc::new(setup),
+            workers: Arc::default(),
         }
+    }
+
+    /// With workers of these kinds to delegate to, each set up as given.
+    pub fn with_workers(mut self, kinds: HashMap<String, ThreadSetup>) -> Self {
+        self.workers = Arc::new(kinds);
+        self
+    }
+
+    /// Starts a worker of `kind` on `task`, for the tool call `call` in `thread` (`workers`).
+    /// The same call again finds the worker it started.
+    pub fn delegate(&self, thread: &str, call: &str, kind: &str, task: &str) -> Result<Worker> {
+        let Some(setup) = self.workers.get(kind) else {
+            return Err(Rejected(format!("there is no {kind} worker")).into());
+        };
+        self.engine
+            .commit(|tx| workers::delegate(tx, setup, thread, call, kind, task))
+    }
+
+    /// Every worker there has been, oldest first.
+    pub fn workers(&self) -> Result<Vec<Worker>> {
+        workers::all(&self.engine)
+    }
+
+    /// Stops the worker `id`: its report never comes. Returns whether it was running.
+    pub fn cancel_worker(&self, id: &str) -> Result<bool> {
+        if !is_worker(id) {
+            return Err(Rejected(format!("{id} is not a worker")).into());
+        }
+        self.abort(id)
     }
 
     pub fn engine(&self) -> &Engine {
@@ -427,7 +488,9 @@ impl Agent {
             None => {
                 let now = std::time::SystemTime::now();
                 let store = self.engine.store().as_ref();
-                let threads = router.threads(store, now)?;
+                // Workers' threads aren't the conversation: nothing is routed to them.
+                let mut threads = router.threads(store, now)?;
+                threads.retain(|t| !is_worker(&t.info.id));
                 let routing = router::Input {
                     text: draft.text.clone(),
                     now,

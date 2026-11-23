@@ -16,6 +16,7 @@
 
 mod events;
 mod note_tools;
+mod worker_tools;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,6 +65,15 @@ pub struct Config {
     pub effort: Effort,
     /// The router's fast model, its last resort.
     pub router_model: String,
+    /// The user's TypeSafe key, for Jev: when there is one, Jev makes the quick decisions:
+    /// where an input goes (`router::JevClassifier`), and what to recall and keep for it
+    /// (`Experience::jev`).
+    pub jev_key: Option<String>,
+    /// Which Jev; pinned, since its confidence thresholds are tuned to it.
+    pub jev_model: String,
+    /// The user's Exa key, for research workers: with one, the model can hand research to a
+    /// worker that searches the web (`delegate`).
+    pub exa_key: Option<String>,
     pub agent: agent::Settings,
     /// Record to the journal (`telemetry`), for `just inspect`.
     pub journal: bool,
@@ -86,6 +96,9 @@ impl std::fmt::Debug for Config {
             )
             .field("model", &self.model)
             .field("router_model", &self.router_model)
+            .field("jev_key", &self.jev_key.as_ref().map(|_| "<set>"))
+            .field("jev_model", &self.jev_model)
+            .field("exa_key", &self.exa_key.as_ref().map(|_| "<set>"))
             .finish_non_exhaustive()
     }
 }
@@ -96,7 +109,8 @@ impl Config {
     /// `BASETEN_API_KEY`: required); `TOKIDOKI_MODEL` and `TOKIDOKI_ROUTER_MODEL` (default:
     /// the provider's, `Config::models`); `TOKIDOKI_DATA` (default `data`), `TOKIDOKI_USER`
     /// (default `owner`), `TOKIDOKI_SPEAKERS` (comma-separated IDs, default `owner`),
-    /// `TOKIDOKI_SYSTEM`.
+    /// `TOKIDOKI_SYSTEM`; `TYPESAFE_API_KEY` for Jev, with `TOKIDOKI_JEV_MODEL`; and
+    /// `EXA_API_KEY` for research workers.
     pub fn from_env() -> Result<Self> {
         let provider = Self::provider_from_env()?;
         let key = var(provider.key_var())
@@ -129,6 +143,15 @@ impl Config {
         }
         if let Some(system) = var("TOKIDOKI_SYSTEM") {
             config.system = Some(system);
+        }
+        if let Some(key) = var("TYPESAFE_API_KEY") {
+            config.jev_key = Some(key);
+        }
+        if let Some(key) = var("EXA_API_KEY") {
+            config.exa_key = Some(key);
+        }
+        if let Some(model) = var("TOKIDOKI_JEV_MODEL") {
+            config.jev_model = model;
         }
         self
     }
@@ -199,6 +222,9 @@ impl Config {
             model: model.into(),
             effort: Effort::Low,
             router_model: router_model.into(),
+            jev_key: None,
+            jev_model: jev::MODEL.into(),
+            exa_key: None,
             agent: agent::Settings::default(),
             journal: true,
         }
@@ -241,6 +267,11 @@ pub struct Parts<M> {
     /// The journal being recorded to (`telemetry::record`), flushed on `close`. Everything
     /// the system does happens in its span.
     pub journal: Option<telemetry::Recording>,
+    /// Exa, for research workers: without it there are no workers.
+    pub exa: Option<exa::Exa>,
+    /// What decides whether a worker's report is worth interrupting the user for, when they
+    /// have moved on from the thread that asked (Jev).
+    pub review: Option<Arc<dyn agent::Review>>,
 }
 
 /// The running system; cheap to clone.
@@ -316,7 +347,14 @@ impl Tokidoki {
         );
         // A thread cools when it dreams.
         router.dream_after = std::time::Duration::from_millis(config.agent.dream_after_ms);
-        let experience = Experience::new(
+        // With a TypeSafe key, Jev makes the quick decisions: where an input goes, and what to
+        // recall and keep for it.
+        let jev =
+            (config.jev_key.as_ref()).map(|key| jev::Jev::new(key).model(config.jev_model.clone()));
+        if let Some(jev) = &jev {
+            router.classifier = Some(Box::new(router::JevClassifier::new(jev.clone())));
+        }
+        let mut experience = Experience::new(
             provider(),
             answers(),
             memory.clone(),
@@ -325,6 +363,13 @@ impl Tokidoki {
                 write: scope.clone(),
             },
         );
+        // With an Exa key there are research workers: Jev also judges what to hand them, and
+        // whether a report is worth interrupting the user for.
+        let exa = config.exa_key.as_ref().map(exa::Exa::new);
+        experience.delegation = exa.is_some();
+        let review = (jev.clone())
+            .map(|jev| Arc::new(worker_tools::JevReview(jev)) as Arc<dyn agent::Review>);
+        experience.jev = jev;
         let model = Arc::new(ProviderModel {
             provider: provider(),
             request: answers(),
@@ -342,6 +387,8 @@ impl Tokidoki {
             settings: config.agent,
             speakers: config.speakers,
             journal,
+            exa,
+            review,
         };
         Self::assemble(parts, asleep)
     }
@@ -354,17 +401,34 @@ impl Tokidoki {
     fn assemble<M: Model>(parts: Parts<M>, asleep: Option<String>) -> Result<Self> {
         // The engine keeps the span it is opened in, for everything it runs.
         let _recorded = span_of(&parts.journal).entered();
-        // Every thread can keep the user's notes, and is told when to.
+        // Every thread can keep the user's notes, and is told when to; and, with Exa, hand
+        // research to workers.
         let mut tools = parts.tools;
         note_tools::add(&mut tools, &parts.notes);
-        let system = match parts.system {
+        let mut system = match parts.system {
             Some(system) => format!("{system}\n\n{}", note_tools::PROMPT),
             None => note_tools::PROMPT.to_string(),
         };
+        let late = worker_tools::Late::default();
+        if parts.exa.is_some() {
+            worker_tools::add(&mut tools, &late);
+            system = format!("{system}\n\n{}", worker_tools::PROMPT);
+        }
         let setup = ThreadSetup {
             system: Some(system),
             tools: tools.specs(),
         };
+        // A research worker searches with its own tools, which the conversation doesn't have.
+        let mut kinds = std::collections::HashMap::new();
+        if let Some(exa) = &parts.exa {
+            let research = worker_tools::research(exa);
+            let setup = ThreadSetup {
+                system: Some(worker_tools::RESEARCH_PROMPT.into()),
+                tools: research.specs(),
+            };
+            kinds.insert(worker_tools::RESEARCH.to_string(), setup);
+            tools.extend(research);
+        }
         let live = Live::default();
         // Whatever changes memory (answering, dreaming, the user) or a note is shown as it
         // happens.
@@ -377,21 +441,24 @@ impl Tokidoki {
             .notes
             .watch(move |change| shown.show(note_tools::change(change)));
         let mut registry = Registry::new();
-        agent::register(
+        agent::register_with_review(
             &mut registry,
             parts.model,
             tools,
             parts.mind,
             parts.settings,
             live.clone(),
+            parts.review,
         );
         let engine = Engine::open(parts.store.clone(), registry, engine::Settings::default())?;
         if asleep.is_none() {
             engine.resume();
         }
+        let agent = Agent::new(engine, setup).with_workers(kinds);
+        let _ = late.set(agent.clone());
         Ok(Self {
             inner: Arc::new(Inner {
-                agent: Agent::new(engine, setup),
+                agent,
                 live,
                 router: parts.router,
                 memory: parts.memory,
@@ -472,6 +539,7 @@ impl Tokidoki {
         let views = self.inner.router.threads(self.inner.store.as_ref(), now)?;
         Ok(views
             .into_iter()
+            .filter(|view| !agent::is_worker(&view.info.id))
             .map(|view| ThreadSummary {
                 about: view.card.map(|card| card.text),
                 resume: view.resume.map(|resume| resume.text),
@@ -497,6 +565,9 @@ impl Tokidoki {
         // (when it started, the thread, its checkpoints) for every turn.
         let mut all: Vec<(u64, String, Vec<interface::Event>)> = Vec::new();
         for info in self.inner.store.threads()? {
+            if agent::is_worker(&info.id) {
+                continue;
+            }
             engine.thread(&info.id, |thread| {
                 for checkpoint in thread.checkpoints() {
                     let event = events::checkpoint(&info.id, checkpoint);
@@ -619,6 +690,21 @@ impl Tokidoki {
             return Err(Rejected(format!("note {id} is already gone")).into());
         }
         Ok(())
+    }
+
+    /// Every worker there has been, latest first: what it was asked, how it is doing, what it
+    /// found.
+    pub fn workers(&self, from: &Speaker) -> Result<Vec<interface::Worker>> {
+        self.admit(from)?;
+        let workers = self.inner.agent.workers()?.into_iter().rev();
+        Ok(workers.map(worker_tools::shown).collect())
+    }
+
+    /// Stops the worker `id`; its report never comes. Returns whether it was running.
+    pub fn cancel_worker(&self, from: &Speaker, id: &str) -> Result<bool> {
+        let _recorded = self.span().entered();
+        self.admit(from)?;
+        self.inner.agent.cancel_worker(id)
     }
 
     /// The memory `id`, if it is this user's and still current.

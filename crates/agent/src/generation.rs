@@ -67,8 +67,9 @@ impl<M: Model> Task for Generation<M> {
                 inbox::place_steers(tx, thread)?;
                 tx.thread(thread)?.start_step()?;
                 Ok(Some(Next::Continue(match self.mind {
-                    Some(_) => State::Consider { round },
-                    None => State::Request { round, attempt: 1 },
+                    // A worker does no memory work: what it reads isn't the user talking.
+                    Some(_) if !crate::is_worker(thread) => State::Consider { round },
+                    _ => State::Request { round, attempt: 1 },
                 })))
             }),
             &State::Consider { round } => {

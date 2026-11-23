@@ -2,8 +2,12 @@
 //! thread, decides what to do about them, and carries that out against memory. While the
 //! thread is idle, it dreams: summarizes episodes, cleans up memory, compacts the context.
 //!
-//!   recall           decided in code: search memory with the signal's text. Fast, no model.
-//!   retain / refine  decided by the model: one call with every such signal and the memories
+//!   recall           with Jev (`judge`): for every message the user sends, Jev weighs the
+//!                    memories it might need and the ones that would help are brought in.
+//!                    Without Jev, decided in code: search memory with a signal's text.
+//!   retain / refine  with Jev, it judges whether a message tells something lasting; without
+//!                    it, Attention's patterns flag what might be. Either way the model then
+//!                    decides what to write: one call with every such signal and the memories
 //!                    related to them, so it can correct a memory instead of duplicating it.
 //!
 //! Nothing here may break a turn: a decision that fails becomes `Ignore` with the reason.
@@ -20,17 +24,24 @@ use memory::{Body, Card, Episode, Item, Memory, Scope, Source, Write};
 use serde_json::{Value, json};
 use state::{Checkpoint, Event, Recalled, Thread};
 
+mod judge;
 pub mod settle;
 pub use settle::RESUME_HANDOFF;
 
 /// Recall brings at most this many memories per query.
 const RECALL_LIMIT: usize = 3;
+/// Memories Jev may bring into the context per message.
+const JEV_RECALL_LIMIT: usize = 5;
 /// Related memories the model sees per retain/refine signal.
 const RELATED_LIMIT: usize = 5;
+/// Facts Jev places a new one among: what it may repeat, change or take back.
+const PLACEMENT_CANDIDATES: usize = 10;
 /// Transcript characters a card update reads, newest kept.
 const CARD_INPUT_CHARS: usize = 12_000;
 /// Memories refined per dream.
 const REFINE_LIMIT: usize = 200;
+/// Memories each one is paired with for Jev to screen: those it shares the most words with.
+const PAIR_NEIGHBORS: usize = 3;
 
 /// Where memory is read from and written to.
 #[derive(Debug, Clone)]
@@ -119,6 +130,15 @@ pub struct Experience<A> {
     pub compact_after_messages: usize,
     /// Compaction keeps at least this many recent messages as they are.
     pub keep_recent_messages: usize,
+    /// Jev, when there is a key for it: it judges each message the user sends, what to recall
+    /// for it and whether it is worth keeping, in place of the pattern detectors (`judge`).
+    pub jev: Option<jev::Jev>,
+    /// The newest memory Jev has screened for overlaps (`refine`): pairs of older ones aren't
+    /// asked about again. Kept in memory: after a restart the first dream screens them all.
+    screened: std::sync::Mutex<i64>,
+    /// Whether there are workers to hand work to (a `delegate` tool): then Jev also judges
+    /// whether a message is research, and the model is advised to hand it on.
+    pub delegation: bool,
 }
 
 impl<A: Api> Experience<A> {
@@ -138,6 +158,9 @@ impl<A: Api> Experience<A> {
             summarize_after_turns: 3,
             compact_after_messages: 40,
             keep_recent_messages: 10,
+            jev: None,
+            screened: std::sync::Mutex::new(0),
+            delegation: false,
         }
     }
 
@@ -151,12 +174,23 @@ impl<A: Api> Experience<A> {
     #[tracing::instrument(skip_all)]
     pub async fn consider(&self, thread: &mut Thread) -> Result<Outcome> {
         let upto = thread.checkpoints().len();
-        let signals = self.attention.attend(thread, thread.considered_upto());
-        if signals.is_empty() {
+        let from = thread.considered_upto();
+        let mut signals = self.attention.attend(thread, from);
+        let mut in_context = recalled_in_context(thread);
+        let heard = self.judge(thread, from, &in_context).await;
+        let kept = heard.as_ref().and_then(|heard| heard.keep.clone());
+        let advice = heard.as_ref().and_then(|heard| heard.advice.clone());
+        if heard.is_some() {
+            // Jev speaks for the user's words: the patterns found in them give way to it.
+            signals.retain(|s| s.source != attention::Source::User);
+        }
+        // Once Jev has judged a message, it is considered even when nothing came of it, so
+        // another step of the same turn doesn't ask again.
+        if signals.is_empty() && heard.is_none() {
             return Ok(Outcome::default());
         }
 
-        let (recalls, judged): (Vec<&Signal>, Vec<&Signal>) =
+        let (recalls, mut judged): (Vec<&Signal>, Vec<&Signal>) =
             signals.iter().partition(|s| s.intent == Intent::Recall);
         let mut planned = Vec::new();
         for signal in recalls {
@@ -168,14 +202,35 @@ impl<A: Api> Experience<A> {
             }
         }
         let mut outcome = Outcome::default();
+        // What Jev found worth keeping, it also places: the model only writes the words, and
+        // not at all for what is already known or taken back. Unplaced, the model decides.
+        let keep = heard.as_ref().and_then(|heard| heard.keep.as_ref());
+        if let (Some(heard), Some(keep)) = (&heard, keep) {
+            match self.place(&thread.id, keep, heard).await {
+                Ok(Some(decision)) => planned.push(decision),
+                Ok(None) => judged.push(keep),
+                Err(error) => outcome.failed.push(format!("writing: {error:#}")),
+            }
+        }
         if !judged.is_empty() {
-            match self.decide(&judged, &thread.id).await {
+            match self
+                .decide(
+                    &judged,
+                    &thread.id,
+                    heard.as_ref().map_or(&[][..], |h| &h.recall),
+                )
+                .await
+            {
                 Ok(decisions) => planned.extend(decisions),
                 Err(error) => outcome.failed.push(format!("deciding: {error:#}")),
             }
         }
 
-        let mut in_context = recalled_in_context(thread);
+        for item in heard.into_iter().flat_map(|heard| heard.recall) {
+            if outcome.recalled.len() < JEV_RECALL_LIMIT && in_context.insert(item.id) {
+                outcome.recalled.push(item);
+            }
+        }
         for decision in planned {
             match self.execute(&decision, &mut in_context, &mut outcome) {
                 Ok(()) => outcome.decisions.push(decision),
@@ -190,10 +245,139 @@ impl<A: Api> Experience<A> {
                 text: item.body.text(),
             })
             .collect();
-        thread.considered(upto, recalled)?;
+        thread.considered(upto, recalled, advice)?;
         outcome.signals = signals;
+        outcome.signals.extend(kept);
         trace_outcome(&outcome);
         Ok(outcome)
+    }
+
+    /// Jev's judgement on the latest message the user sent since `from`, if there is one and
+    /// a Jev to ask: the memories to recall for it, and a retain signal when it tells
+    /// something lasting. `None` leaves it to the pattern detectors (no Jev, nothing new from
+    /// the user, or Jev failed).
+    async fn judge(
+        &self,
+        thread: &Thread,
+        from: usize,
+        in_context: &HashSet<i64>,
+    ) -> Option<Heard> {
+        let jev = self.jev.as_ref()?;
+        let (checkpoint, message) = latest_user_message(thread, from)?;
+        let candidates = match self.candidates(&message, in_context) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "no memories to weigh");
+                Vec::new()
+            }
+        };
+        let earlier = earlier_messages(thread, checkpoint, judge::CONTEXT_MESSAGES);
+        let judged = match judge::judge(jev, &message, &earlier, candidates, self.delegation).await
+        {
+            Ok(judged) => judged,
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "jev couldn't judge; the patterns will");
+                return None;
+            }
+        };
+        let keep = (judged.lasting >= judge::RETAIN_MIN).then(|| Signal {
+            detector: "jev".into(),
+            intent: Intent::Retain,
+            salience: judged.lasting as f32,
+            checkpoint,
+            source: attention::Source::User,
+            text: message,
+            spans: Vec::new(),
+            reason: format!("tells something lasting ({:.2})", judged.lasting),
+        });
+        let advice = (judged.research)
+            .filter(|p| *p >= judge::RESEARCH_MIN)
+            .map(|p| format!("{DELEGATE_ADVICE} (Jev: research, {p:.2})"));
+        Some(Heard {
+            recall: judged.recall.into_iter().map(|(item, _)| item).collect(),
+            keep,
+            advice,
+            earlier,
+        })
+    }
+
+    /// What to do with `keep`, a message Jev found lasting, placed by Jev among the facts it
+    /// may repeat, change or take back: written by the model only when there are words to
+    /// write. `None` when Jev isn't sure (the model decides as without Jev).
+    async fn place(&self, thread: &str, keep: &Signal, heard: &Heard) -> Result<Option<Decision>> {
+        let Some(jev) = &self.jev else {
+            return Ok(None);
+        };
+        let related = self.related_facts(&keep.text, &heard.recall)?;
+        let placed = judge::placement(jev, &keep.text, &heard.earlier, &related).await;
+        let placement = match placed {
+            Ok(Some(placement)) => placement,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "jev couldn't place it; the model will");
+                return Ok(None);
+            }
+        };
+        let source = Some(Source {
+            thread: thread.to_string(),
+            checkpoint: keep.checkpoint,
+        });
+        let said = said(&keep.text, &heard.earlier);
+        Ok(Some(match placement {
+            judge::Placement::Known => Decision::Ignore {
+                reason: "already remembered".into(),
+            },
+            judge::Placement::Withdraws(id) => Decision::Forget { id },
+            judge::Placement::New => {
+                let text = self.ask(WRITE_PROMPT, said).await?;
+                let mut write = Write::fact(self.scopes.write.clone(), text.trim());
+                write.source = source;
+                Decision::Retain(write)
+            }
+            judge::Placement::Changes(id) => {
+                let Some(old) = related.iter().find(|item| item.id == id) else {
+                    return Ok(None);
+                };
+                let input = format!("Memory: {}\n\n{said}", old.body.text());
+                let text = self.ask(REWRITE_PROMPT, input).await?;
+                let mut write = Write::fact(old.scope.clone(), text.trim());
+                write.key = old.key.clone();
+                write.source = source;
+                Decision::Refine { id, write }
+            }
+        }))
+    }
+
+    /// The facts `message` may repeat, change or take back: what Jev recalled for it, then
+    /// what shares words with it. Procedures are left to the model.
+    fn related_facts(&self, message: &str, recalled: &[Item]) -> Result<Vec<Item>> {
+        let hits = self
+            .memory
+            .search(message, &self.scopes.searched(), RELATED_LIMIT)?;
+        let mut seen = HashSet::new();
+        Ok(recalled
+            .iter()
+            .cloned()
+            .chain(hits.into_iter().map(|hit| hit.item))
+            .filter(|item| matches!(item.body, Body::Semantic { .. }) && seen.insert(item.id))
+            .take(PLACEMENT_CANDIDATES)
+            .collect())
+    }
+
+    /// The memories Jev weighs for `message`: those that share words with it, then the most
+    /// recent, none already in the context.
+    fn candidates(&self, message: &str, in_context: &HashSet<i64>) -> Result<Vec<Item>> {
+        let scopes = self.scopes.searched();
+        let hits = self.memory.search(message, &scopes, judge::CANDIDATES)?;
+        let recent = self.memory.list(&scopes, judge::CANDIDATES)?;
+        let mut seen = HashSet::new();
+        Ok(hits
+            .into_iter()
+            .map(|hit| hit.item)
+            .chain(recent)
+            .filter(|item| !in_context.contains(&item.id) && seen.insert(item.id))
+            .take(judge::CANDIDATES)
+            .collect())
     }
 
     /// Idle work, between turns: summarize finished turns into an episode, update the thread's
@@ -223,29 +407,54 @@ impl<A: Api> Experience<A> {
         Ok(dream)
     }
 
-    /// Rewrites the thread's card when turns finished since the last one.
+    /// Rewrites the thread's card when turns finished since the last one; with Jev, only when
+    /// they change what the card says (otherwise it stays as it is, now covering them).
     #[tracing::instrument(skip_all)]
     async fn card(&self, thread: &Thread) -> Result<Option<Card>> {
         let previous = self.memory.card(&thread.id)?;
         let previous = previous.as_ref().map(|c| (c.text.as_str(), c.to));
-        let Some((end, input)) = card_input(thread, previous, "Current card", CARD_INPUT_CHARS)
-        else {
+        let Some(card) = card_input(thread, previous, "Current card", CARD_INPUT_CHARS) else {
             return Ok(None);
         };
-        let text = self.ask(CARD_PROMPT, input).await?;
+        let text = match previous {
+            Some((text, _)) if self.still_holds(text, &card.since).await => text.to_string(),
+            _ => self.ask(CARD_PROMPT, card.input).await?,
+        };
         Ok(Some(self.memory.add_card(
             &thread.id,
             self.scopes.write.clone(),
             text.trim(),
-            end,
+            card.end,
         )?))
     }
 
-    /// One model call for every retain/refine signal, with the memories related to them.
+    /// Whether Jev finds `card` still true after `since`, so it needn't be rewritten. False
+    /// without Jev, or when it can't tell: the model writes it.
+    pub(crate) async fn still_holds(&self, card: &str, since: &str) -> bool {
+        let Some(jev) = &self.jev else {
+            return false;
+        };
+        match judge::still_holds(jev, card, since).await {
+            Ok(p) => p >= judge::STILL_HOLDS_MIN,
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "jev couldn't judge the card; the model rewrites it");
+                false
+            }
+        }
+    }
+
+    /// One model call for every retain/refine signal, with the memories related to them: what
+    /// a search for each finds, and `known` (what Jev judged relevant, which a move to Porto
+    /// is to "lives in Lisbon" though they share no word).
     #[tracing::instrument(skip_all)]
-    async fn decide(&self, signals: &[&Signal], thread: &str) -> Result<Vec<Decision>> {
+    async fn decide(
+        &self,
+        signals: &[&Signal],
+        thread: &str,
+        known: &[Item],
+    ) -> Result<Vec<Decision>> {
         let scopes = self.scopes.searched();
-        let mut related: HashMap<i64, Item> = HashMap::new();
+        let mut related: HashMap<i64, Item> = known.iter().map(|i| (i.id, i.clone())).collect();
         for signal in signals {
             for hit in self.memory.search(&signal.text, &scopes, RELATED_LIMIT)? {
                 related.insert(hit.item.id, hit.item);
@@ -316,8 +525,19 @@ impl<A: Api> Experience<A> {
         if ends.len() < self.summarize_after_turns {
             return Ok(None);
         }
-        let messages = messages(&thread.checkpoints()[start..=end]);
-        let summary = self.ask(SUMMARIZE_PROMPT, transcript(messages)).await?;
+        let turns = transcript(messages(&thread.checkpoints()[start..=end]));
+        // Small talk and quick lookups aren't worth an episode: with Jev, they wait to be
+        // summarized with whatever comes after them.
+        if let Some(jev) = &self.jev {
+            match judge::worth_remembering(jev, &last_chars(&turns, CARD_INPUT_CHARS)).await {
+                Ok(p) if p < judge::WORTH_MIN => return Ok(None),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "jev couldn't judge the turns; the model summarizes them");
+                }
+            }
+        }
+        let summary = self.ask(SUMMARIZE_PROMPT, turns).await?;
         Ok(Some(self.memory.add_episode(
             &thread.id,
             self.scopes.write.clone(),
@@ -327,7 +547,8 @@ impl<A: Api> Experience<A> {
         )?))
     }
 
-    /// Drops exact duplicates in code, then lets the model merge or correct the rest.
+    /// Drops exact duplicates in code, then lets the model merge or correct the rest: with
+    /// Jev, only what Jev finds overlapping.
     #[tracing::instrument(skip_all)]
     async fn refine(&self) -> Result<Vec<Item>> {
         let mut refined = Vec::new();
@@ -349,6 +570,22 @@ impl<A: Api> Experience<A> {
         if remaining.len() < 2 {
             return Ok(refined);
         }
+        // With Jev, the model sees only the memories Jev finds overlapping, and none at all
+        // when it finds nothing: usually the case.
+        let newest = remaining.iter().map(|item| item.id).max().unwrap_or(0);
+        if let Some(jev) = &self.jev {
+            let pairs = self.pairs(&remaining)?;
+            let flagged = match pairs.is_empty() {
+                true => Vec::new(),
+                false => judge::overlapping(jev, &pairs).await?,
+            };
+            let involved: HashSet<i64> = flagged.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
+            remaining.retain(|item| involved.contains(&item.id));
+            if remaining.is_empty() {
+                *self.screened.lock().unwrap() = newest;
+                return Ok(refined);
+            }
+        }
 
         let payload: Vec<Value> = remaining.iter().map(describe).collect();
         let reply = self
@@ -356,7 +593,34 @@ impl<A: Api> Experience<A> {
             .await?;
         let by_id: HashMap<i64, Item> = remaining.into_iter().map(|i| (i.id, i)).collect();
         refined.extend(self.apply_refinements(&reply, &by_id)?);
+        *self.screened.lock().unwrap() = newest;
         Ok(refined)
+    }
+
+    /// Memories in `items` that may overlap, for Jev to screen: each with the few others it
+    /// shares the most words with, where at least one is newer than what was last screened
+    /// (a pair checked once isn't asked about again until one of them changes).
+    fn pairs(&self, items: &[Item]) -> Result<Vec<(Item, Item)>> {
+        let screened = *self.screened.lock().unwrap();
+        let by_id: HashMap<i64, &Item> = items.iter().map(|item| (item.id, item)).collect();
+        let scope = std::slice::from_ref(&self.scopes.write);
+        let mut seen = HashSet::new();
+        let mut pairs = Vec::new();
+        for item in items {
+            for hit in self
+                .memory
+                .search(&item.body.text(), scope, PAIR_NEIGHBORS + 1)?
+            {
+                let (a, b) = (item.id.min(hit.item.id), item.id.max(hit.item.id));
+                if a == b || b <= screened || !seen.insert((a, b)) {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (by_id.get(&a), by_id.get(&b)) {
+                    pairs.push(((*a).clone(), (*b).clone()));
+                }
+            }
+        }
+        Ok(pairs)
     }
 
     /// Carries out the refine and forget decisions in `reply` about the memories `shown`.
@@ -411,6 +675,66 @@ impl<A: Api> Experience<A> {
 }
 
 /// What attention noticed and what came of it; each failure is a warning.
+/// What Jev made of the user's latest message (`Experience::judge`).
+struct Heard {
+    recall: Vec<Item>,
+    /// The message as a retain signal, when it tells something lasting.
+    keep: Option<Signal>,
+    /// Advice for the model: hand the message to a worker.
+    advice: Option<String>,
+    /// What was said before it, as Jev was shown it.
+    earlier: Vec<String>,
+}
+
+/// What the user said, after what came before it, for the model to write a memory from.
+fn said(message: &str, earlier: &[String]) -> String {
+    match earlier.is_empty() {
+        true => format!("The user said: {message}"),
+        false => format!(
+            "Earlier:\n{}\n\nThe user said: {message}",
+            earlier.join("\n")
+        ),
+    }
+}
+
+/// The latest message the user sent since `from` (not a tool result), with its checkpoint.
+fn latest_user_message(thread: &Thread, from: usize) -> Option<(usize, String)> {
+    thread
+        .checkpoints()
+        .iter()
+        .skip(from)
+        .rev()
+        .find_map(|checkpoint| match &checkpoint.event {
+            Event::Message(message) if message.role == Role::User => {
+                let text = message.text();
+                (!text.trim().is_empty()).then_some((checkpoint.id, text))
+            }
+            _ => None,
+        })
+}
+
+/// Up to `n` messages before `checkpoint` that have words, oldest first, as "who: text".
+fn earlier_messages(thread: &Thread, checkpoint: usize, n: usize) -> Vec<String> {
+    let mut earlier: Vec<String> = thread.checkpoints()[..checkpoint]
+        .iter()
+        .rev()
+        .filter_map(|c| match &c.event {
+            Event::Message(message) => {
+                let text = message.text();
+                let who = match message.role {
+                    Role::User => "User",
+                    Role::Assistant => "Assistant",
+                };
+                (!text.trim().is_empty()).then(|| format!("{who}: {}", text.trim()))
+            }
+            _ => None,
+        })
+        .take(n)
+        .collect();
+    earlier.reverse();
+    earlier
+}
+
 fn trace_outcome(outcome: &Outcome) {
     let signal = |s: &Signal| {
         let intent = format!("{:?}", s.intent).to_lowercase();
@@ -495,7 +819,7 @@ fn card_input(
     previous: Option<(&str, usize)>,
     label: &str,
     max: usize,
-) -> Option<(usize, String)> {
+) -> Option<CardInput> {
     let start = previous.map_or(0, |(_, to)| to + 1);
     let end = *turn_ends(thread, start).last()?;
     let since = last_chars(
@@ -504,9 +828,19 @@ fn card_input(
     );
     let input = match previous {
         Some((text, _)) => format!("{label}:\n{text}\n\nSince then:\n{since}"),
-        None => since,
+        None => since.clone(),
     };
-    Some((end, input))
+    Some(CardInput { end, since, input })
+}
+
+/// What a card (or resume card) is written from.
+pub(crate) struct CardInput {
+    /// The last checkpoint it covers.
+    pub end: usize,
+    /// The turns since the previous card, as a transcript.
+    pub since: String,
+    /// The previous card and `since`, as the model is given them.
+    pub input: String,
 }
 
 /// The last `max` characters, marked "…" when cut.
@@ -657,6 +991,19 @@ Rules: retain only lasting facts, preferences or procedures, not one-off request
 third-person statements ("The user prefers pnpm"), in the language the user used. When a signal corrects a
 related memory, refine it instead of retaining a duplicate. Use a short key (e.g. "name", "package-manager")
 for facts that are settings. When unsure, ignore."#;
+
+/// What the model is told when Jev judges a message research.
+const DELEGATE_ADVICE: &str = "This message looks like research. Hand it to a research worker \
+with `delegate` (once), then tell the user in a sentence that you're on it and will come back \
+with what you find. Don't research it yourself or guess the result.";
+
+const WRITE_PROMPT: &str = "Write what the user said as one fact for an assistant's long-term \
+memory about them: a standalone third-person statement (\"The user ...\"), in the language the user \
+used, with every specific detail they gave and nothing added. One sentence, plain text only.";
+
+const REWRITE_PROMPT: &str = "Rewrite this memory about the user so it says what is true now, \
+given what they said: a standalone third-person statement (\"The user ...\"), in the memory's \
+language, keeping what still holds and nothing added. One sentence, plain text only.";
 
 const SUMMARIZE_PROMPT: &str = "Summarize these conversation turns as an episodic memory: what was asked, what was done, \
 and how it ended, in 2-5 sentences, in the language of the conversation. Plain text only.";
@@ -959,6 +1306,290 @@ pub(crate) mod tests {
         assert_eq!(compaction_cut(&messages, 0), Some(2));
     }
 
+    /// A Jev that answers every request with `answers` (question name to answer).
+    async fn fake_jev(answers: Value) -> jev::Jev {
+        counted_jev(answers).await.0
+    }
+
+    /// `fake_jev`, and how many requests it has answered.
+    async fn counted_jev(answers: Value) -> (jev::Jev, Arc<std::sync::atomic::AtomicUsize>) {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = asked.clone();
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let body = json!({
+            "model": "jev-test",
+            "answers": answers,
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        })
+        .to_string();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                // Reads the request (headers, then as much body as they announce), answers, closes.
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    request.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        (jev::Jev::new("test").base(base), asked)
+    }
+
+    /// Jev's judgement replaces the patterns on the user's words: what it finds relevant is
+    /// recalled (though it shares no word with the message), and a message it doesn't find
+    /// lasting isn't sent to the model to keep, whatever a pattern says.
+    #[tokio::test]
+    async fn jev_judges_in_place_of_the_patterns() {
+        let mut exp = unreachable();
+        let fact = exp
+            .memory()
+            .write(Write::fact(me(), "The user is vegetarian."))
+            .unwrap();
+        exp.jev = Some(
+            fake_jev(json!({
+                "lasting": { "type": "noul", "noul": 0.1 },
+                format!("memory_{}", fact.id): { "type": "noul", "noul": 0.9 }
+            }))
+            .await,
+        );
+        let mut thread = Thread::new("t1");
+        thread
+            .start_turn(Message::user(
+                "Remember to suggest something for dinner tonight.",
+            ))
+            .unwrap();
+        thread.start_step().unwrap();
+
+        let outcome = exp.consider(&mut thread).await.unwrap();
+        assert_eq!(outcome.recalled, [fact]);
+        assert!(outcome.signals.is_empty(), "{:?}", outcome.signals);
+        assert!(
+            outcome.failed.is_empty(),
+            "no model call: {:?}",
+            outcome.failed
+        );
+        // Judged once: another step of the same turn doesn't ask again.
+        thread.start_step().unwrap();
+        let again = exp.consider(&mut thread).await.unwrap();
+        assert!(again.recalled.is_empty() && again.signals.is_empty());
+    }
+
+    /// With Jev out of reach, the patterns decide, as with no Jev at all.
+    #[tokio::test]
+    async fn without_jev_the_patterns_decide() {
+        let mut exp = experience("unused");
+        exp.jev = Some(jev::Jev::new("test").base("http://127.0.0.1:9"));
+        let fact = exp
+            .memory()
+            .write(Write::fact(me(), "The user's name is Jon."))
+            .unwrap();
+        let mut thread = Thread::new("t1");
+        thread.start_turn(Message::user("What's my name?")).unwrap();
+        thread.start_step().unwrap();
+        assert_eq!(exp.consider(&mut thread).await.unwrap().recalled, [fact]);
+    }
+
+    /// With Jev finding no overlap, cleaning up asks no model at all (this one would fail);
+    /// asked again with nothing new, it doesn't even ask Jev; a new memory is screened.
+    #[tokio::test]
+    async fn jev_screens_memories_so_the_model_reads_none_when_nothing_overlaps() {
+        let mut exp = unreachable();
+        for fact in [
+            "The user lives in Lisbon.",
+            "The user lives near the river.",
+            "The user uses pnpm.",
+        ] {
+            exp.memory().write(Write::fact(me(), fact)).unwrap();
+        }
+        let (jev, asked) = counted_jev(json!({})).await;
+        exp.jev = Some(jev);
+        let count = || asked.load(std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(exp.refine().await.unwrap(), []);
+        assert_eq!(count(), 1);
+        assert_eq!(exp.refine().await.unwrap(), []);
+        assert_eq!(count(), 1, "nothing new since: nothing to ask");
+        exp.memory()
+            .write(Write::fact(me(), "The user lives by the sea."))
+            .unwrap();
+        assert_eq!(exp.refine().await.unwrap(), []);
+        assert_eq!(count(), 2);
+    }
+
+    /// A pair Jev flags goes to the model: here unreachable, so cleaning up fails, and is
+    /// tried again next dream.
+    #[tokio::test]
+    async fn a_pair_jev_flags_goes_to_the_model() {
+        let mut exp = unreachable();
+        let a = exp
+            .memory()
+            .write(Write::fact(me(), "The user lives in Lisbon."))
+            .unwrap();
+        let b = exp
+            .memory()
+            .write(Write::fact(me(), "The user lives in Porto now."))
+            .unwrap();
+        let flagged = json!({ format!("pair_{}_{}", a.id, b.id): { "type": "noul", "noul": 0.9 } });
+        let (jev, asked) = counted_jev(flagged).await;
+        exp.jev = Some(jev);
+        assert!(exp.refine().await.is_err());
+        assert!(
+            exp.refine().await.is_err(),
+            "still unscreened after a failure"
+        );
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// With Jev finding nothing new, a dream writes nothing with the model (this one would
+    /// fail): the card stays, now covering the new turns, and small talk waits for an episode.
+    #[tokio::test]
+    async fn small_talk_is_dreamed_without_the_model() {
+        let mut exp = unreachable();
+        exp.jev = Some(
+            fake_jev(json!({
+                "still_holds": { "type": "noul", "noul": 0.9 },
+                "worth_remembering": { "type": "noul", "noul": 0.1 }
+            }))
+            .await,
+        );
+        let mut thread = Thread::new("t1");
+        turn(&mut thread, "Plan a trip to Kyoto in April.", "Book early.");
+        let card = exp
+            .memory()
+            .add_card(
+                "t1",
+                me(),
+                "Kyoto in April.",
+                thread.checkpoints().len() - 1,
+            )
+            .unwrap();
+        for _ in 0..3 {
+            turn(&mut thread, "thanks!", "Any time.");
+        }
+
+        let dream = exp.dream(&mut thread).await.unwrap();
+        assert!(dream.failed.is_empty(), "{:?}", dream.failed);
+        assert_eq!(dream.episode, None);
+        let kept = dream.card.unwrap();
+        assert_eq!(kept.text, card.text);
+        assert_eq!(kept.to, thread.checkpoints().len() - 1);
+    }
+
+    /// Turns Jev finds changing the card, or worth remembering, go to the model as before.
+    #[tokio::test]
+    async fn what_changes_is_dreamed_by_the_model() {
+        let mut exp = unreachable();
+        exp.jev = Some(
+            fake_jev(json!({
+                "still_holds": { "type": "noul", "noul": 0.1 },
+                "worth_remembering": { "type": "noul", "noul": 0.9 }
+            }))
+            .await,
+        );
+        let mut thread = Thread::new("t1");
+        turn(&mut thread, "Plan a trip to Kyoto in April.", "Book early.");
+        exp.memory()
+            .add_card(
+                "t1",
+                me(),
+                "Kyoto in April.",
+                thread.checkpoints().len() - 1,
+            )
+            .unwrap();
+        for _ in 0..3 {
+            turn(&mut thread, "Make it Osaka in May instead.", "Done.");
+        }
+        let dream = exp.dream(&mut thread).await.unwrap();
+        let failed: Vec<&str> = dream.failed.iter().map(|(part, _)| *part).collect();
+        assert_eq!(failed, ["summarize", "card"]);
+    }
+
+    /// Experience over an unreachable model, with a vegetarian fact Jev recalls, finding `message`
+    /// lasting and placing it as `about` (and `withdraws`); and the outcome of considering it.
+    async fn placed(
+        message: &str,
+        about: &str,
+        withdraws: f64,
+    ) -> (Outcome, Experience<Anthropic>, Item) {
+        let mut exp = unreachable();
+        let fact = exp
+            .memory()
+            .write(Write::fact(me(), "The user is vegetarian."))
+            .unwrap();
+        let about = about.replace("FACT", &format!("memory_{}", fact.id));
+        exp.jev = Some(
+            fake_jev(json!({
+                "lasting": { "type": "noul", "noul": 0.9 },
+                format!("memory_{}", fact.id): { "type": "noul", "noul": 0.9 },
+                "about": { "type": "choice", "choice": about, "confidence": 0.9, "probabilities": {} },
+                "withdraws": { "type": "noul", "noul": withdraws }
+            }))
+            .await,
+        );
+        let mut thread = Thread::new("t1");
+        thread.start_turn(Message::user(message)).unwrap();
+        thread.start_step().unwrap();
+        let outcome = exp.consider(&mut thread).await.unwrap();
+        (outcome, exp, fact)
+    }
+
+    /// What Jev places as already known or taken back is done without the model (this one
+    /// would fail); what needs words goes to it.
+    #[tokio::test]
+    async fn jev_places_what_to_keep_and_the_model_only_writes() {
+        let (outcome, exp, fact) = placed("As I said, I'm vegetarian.", "known", 0.1).await;
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert!(
+            matches!(outcome.decisions[..], [Decision::Ignore { .. }]),
+            "{:?}",
+            outcome.decisions
+        );
+        assert_eq!(exp.memory().get(fact.id).unwrap(), Some(fact));
+
+        let (outcome, exp, fact) = placed("Forget that I'm vegetarian.", "FACT", 0.9).await;
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(outcome.decisions, [Decision::Forget { id: fact.id }]);
+        assert_eq!(exp.memory().get(fact.id).unwrap(), None);
+
+        for (message, about) in [
+            ("My daughter Mia starts school in September.", "new"),
+            ("I eat fish now.", "FACT"),
+        ] {
+            let (outcome, _, _) = placed(message, about, 0.1).await;
+            assert!(
+                outcome.failed[0].starts_with("writing:"),
+                "{message}: {:?}",
+                outcome.failed
+            );
+        }
+    }
     pub fn key() -> String {
         std::env::var("ANTHROPIC_API_KEY").expect("set ANTHROPIC_API_KEY")
     }
@@ -1002,6 +1633,192 @@ pub(crate) mod tests {
         assert!(res.message.text().contains("Jon"));
     }
 
+    /// Jev recalls what helps with each message, though it shares no word with it, and keeps
+    /// what lasts: a move is written, correcting where the user lives (`TYPESAFE_API_KEY`;
+    /// the writing on Anthropic's cheapest model).
+    #[tokio::test]
+    #[ignore = "calls Jev and Anthropic"]
+    async fn jev_recalls_what_helps_and_keeps_what_lasts() {
+        let mut exp = experience(&key());
+        exp.jev = Some(jev::Jev::new(
+            std::env::var("TYPESAFE_API_KEY").expect("set TYPESAFE_API_KEY"),
+        ));
+        for fact in [
+            "The user is vegetarian.",
+            "The user lives in Lisbon.",
+            "The user prefers pnpm over npm.",
+            "The user's sister Ana has her birthday on March 3.",
+            "The user is allergic to peanuts.",
+            "The user works as a data engineer at a logistics company.",
+        ] {
+            exp.memory().write(Write::fact(me(), fact)).unwrap();
+        }
+        let cases: [(&str, &[&str], bool); 5] = [
+            (
+                "What should I cook tonight?",
+                &["vegetarian", "peanuts"],
+                false,
+            ),
+            ("Set up a new TypeScript project for me.", &["pnpm"], false),
+            ("What should I get my sister?", &["Ana"], false),
+            ("What's 17 times 23?", &[], false),
+            ("By the way, I moved to Porto last month.", &[], true),
+        ];
+        for (n, (message, recall, keep)) in cases.into_iter().enumerate() {
+            let mut thread = Thread::new(format!("t{n}"));
+            thread.start_turn(Message::user(message)).unwrap();
+            thread.start_step().unwrap();
+            let started = std::time::Instant::now();
+            let outcome = exp.consider(&mut thread).await.unwrap();
+            let recalled: Vec<String> = outcome.recalled.iter().map(|i| i.body.text()).collect();
+            let written: Vec<String> = outcome.written.iter().map(|i| i.body.text()).collect();
+            println!(
+                "{message:?} in {:?}\n  recalled {recalled:?}\n  written {written:?}",
+                started.elapsed()
+            );
+            for word in recall {
+                assert!(
+                    recalled.iter().any(|r| r.contains(word)),
+                    "{message}: {word} not recalled"
+                );
+            }
+            if recall.is_empty() && !keep {
+                assert!(recalled.is_empty(), "{message}: recalled {recalled:?}");
+            }
+            assert_eq!(!written.is_empty(), keep, "{message}: written {written:?}");
+        }
+        let now: Vec<String> = exp
+            .memory()
+            .list(&[me()], 20)
+            .unwrap()
+            .iter()
+            .map(|i| i.body.text())
+            .collect();
+        println!("memory now: {now:#?}");
+        assert!(now.iter().any(|m| m.contains("Porto")));
+        assert!(
+            !now.iter().any(|m| m.contains("lives in Lisbon")),
+            "the move corrects Lisbon"
+        );
+    }
+
+    /// Jev flags what overlaps among memories; the model merges or corrects only those, and
+    /// leaves the rest alone (`TYPESAFE_API_KEY`; the merging on Anthropic's cheapest model).
+    #[tokio::test]
+    #[ignore = "calls Jev and Anthropic"]
+    async fn jev_finds_what_to_tidy() {
+        let mut exp = experience(&key());
+        exp.jev = Some(jev::Jev::new(
+            std::env::var("TYPESAFE_API_KEY").expect("set TYPESAFE_API_KEY"),
+        ));
+        for fact in [
+            "The user lives in Lisbon.",
+            "The user is vegetarian.",
+            "The user prefers pnpm over npm.",
+            "The user's sister is called Ana.",
+            "The user works as a data engineer.",
+            "The user doesn't eat meat.",
+            "The user moved to Porto in October.",
+            "The user's sister Ana lives in Berlin.",
+        ] {
+            exp.memory().write(Write::fact(me(), fact)).unwrap();
+        }
+        let started = std::time::Instant::now();
+        let refined = exp.refine().await.unwrap();
+        println!(
+            "refined in {:?}: {:#?}",
+            started.elapsed(),
+            refined.iter().map(|i| i.body.text()).collect::<Vec<_>>()
+        );
+        let now: Vec<String> = exp
+            .memory()
+            .list(&[me()], 20)
+            .unwrap()
+            .iter()
+            .map(|i| i.body.text())
+            .collect();
+        println!("memory now: {now:#?}");
+        assert!(
+            !now.iter().any(|m| m == "The user lives in Lisbon."),
+            "Porto supersedes Lisbon"
+        );
+        assert_eq!(
+            now.iter()
+                .filter(|m| m.contains("vegetarian") || m.contains("meat"))
+                .count(),
+            1
+        );
+        for kept in ["pnpm", "data engineer"] {
+            assert!(now.iter().any(|m| m.contains(kept)), "{kept} kept");
+        }
+    }
+
+    /// Jev places what the user says among what is remembered: something new is written,
+    /// something known is left alone, a change rewrites the memory it changes, and a memory
+    /// taken back is forgotten (`TYPESAFE_API_KEY`; the writing on Anthropic's cheapest model).
+    #[tokio::test]
+    #[ignore = "calls Jev and Anthropic"]
+    async fn jev_places_each_kind_of_message() {
+        let mut exp = experience(&key());
+        exp.jev = Some(jev::Jev::new(
+            std::env::var("TYPESAFE_API_KEY").expect("set TYPESAFE_API_KEY"),
+        ));
+        for fact in [
+            "The user is vegetarian.",
+            "The user lives in Lisbon.",
+            "The user prefers pnpm over npm.",
+        ] {
+            exp.memory().write(Write::fact(me(), fact)).unwrap();
+        }
+        let cases = [
+            ("My daughter Mia starts school in September.", "retain"),
+            (
+                "As I mentioned, I'm vegetarian, so keep that in mind.",
+                "ignore",
+            ),
+            (
+                "I eat fish now, so I'm pescatarian rather than vegetarian.",
+                "refine",
+            ),
+            (
+                "Please forget that I use pnpm. I don't want you remembering my tools.",
+                "forget",
+            ),
+        ];
+        for (n, (message, expected)) in cases.into_iter().enumerate() {
+            let mut thread = Thread::new(format!("t{n}"));
+            thread.start_turn(Message::user(message)).unwrap();
+            thread.start_step().unwrap();
+            let started = std::time::Instant::now();
+            let outcome = exp.consider(&mut thread).await.unwrap();
+            let written: Vec<String> = outcome.written.iter().map(|i| i.body.text()).collect();
+            println!(
+                "{message:?} in {:?}\n  decisions {:?}\n  written {written:?}",
+                started.elapsed(),
+                outcome.decisions
+            );
+            let actions: Vec<&str> = outcome
+                .decisions
+                .iter()
+                .filter_map(|d| match d {
+                    Decision::Retain(_) => Some("retain"),
+                    Decision::Refine { .. } => Some("refine"),
+                    Decision::Forget { .. } => Some("forget"),
+                    Decision::Ignore { .. } => Some("ignore"),
+                    Decision::Recall { .. } => None,
+                })
+                .collect();
+            assert_eq!(actions, [expected], "{message}");
+        }
+        let now: Vec<String> = exp
+            .memory()
+            .list(&[me()], 20)
+            .unwrap()
+            .iter()
+            .map(|i| i.body.text())
+            .collect();
+        println!("memory now: {now:#?}");
+    }
     #[tokio::test]
     #[ignore = "calls Anthropic"]
     async fn dreams() {

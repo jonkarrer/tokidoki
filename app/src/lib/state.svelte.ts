@@ -17,6 +17,7 @@ import {
   type Status,
   type Submission,
   type ThreadSummary,
+  type Worker,
 } from "./core";
 
 /** What Tokidoki is doing on a thread right now. `writing` is a reply arriving. */
@@ -49,6 +50,8 @@ export const app = $state({
   queued: [] as Submission[],
   /** Why the last input got no answer. */
   unanswered: null as string | null,
+  /** Work handed to workers, latest first: running, or come back. */
+  workers: [] as Worker[],
   /** Why the last send didn't go through. */
   sendError: null as string | null,
 });
@@ -66,7 +69,7 @@ export async function start() {
   app.status = await core.status();
   // Without a key it is asleep, and what it has can still be read.
   if (app.status.state !== "failed")
-    await Promise.all([loadThreads(), loadMemories(), loadNotes(), loadConversation()]);
+    await Promise.all([loadThreads(), loadMemories(), loadNotes(), loadConversation(), loadWorkers()]);
   if (app.status.state === "needs_keys") app.view = "keys";
 }
 
@@ -81,6 +84,15 @@ export async function loadMemories() {
 
 export async function loadNotes() {
   app.notes = await core.notes({ query: "", tag: null, project: null });
+}
+
+export async function loadWorkers() {
+  app.workers = await core.workers();
+}
+
+/** Stops a worker: what it was looking into never comes back. */
+export function cancelWorker(id: string) {
+  return core.cancelWorker(id);
 }
 
 export async function loadThreads() {
@@ -122,6 +134,8 @@ function turns(log: Checkpoint[]) {
 
 /** Takes a thread's checkpoint if it is the next one; after a gap, reads what was missed. */
 function receive(checkpoint: Checkpoint) {
+  // A worker's own thread isn't the conversation: only its report comes back to it.
+  if (checkpoint.thread.startsWith("worker-")) return;
   const last = seen[checkpoint.thread];
   // A thread not shown yet starts here: what it said before is earlier than the conversation.
   if (last === undefined || checkpoint.seq === last + 1) {
@@ -197,6 +211,11 @@ function onEvent(event: CoreEvent) {
     case "memory":
       onMemory(event.change);
       break;
+    case "worker": {
+      const { worker } = event;
+      app.workers = [worker, ...app.workers.filter((w) => w.id !== worker.id)].sort((a, b) => b.started_at - a.started_at);
+      break;
+    }
     case "note":
       onNote(event.change);
       break;
@@ -205,6 +224,7 @@ function onEvent(event: CoreEvent) {
       loadThreads();
       loadMemories();
       loadNotes();
+      loadWorkers();
       break;
   }
 }
@@ -237,7 +257,9 @@ function onNote(change: NoteChange) {
 }
 
 /** A line of the conversation, as shown, and the thread it is in. A user's line that starts
-    another thread than the one before it is `moved`: the talk changed subject there. */
+    another thread than the one before it is `moved`: the talk changed subject there. A
+    worker's report is given to its thread as if said there (agent's `workers.rs`), but is
+    shown as what it is. */
 export type Item = { key: string; thread: string } & (
   | { kind: "user"; text: string; moved: boolean }
   | { kind: "reply"; text: string }
@@ -245,7 +267,21 @@ export type Item = { key: string; thread: string } & (
   | { kind: "recalled"; memories: string[] }
   | { kind: "learned"; memory: Memory }
   | { kind: "compacted" }
+  | { kind: "report"; report: Report }
 );
+
+/** A worker's report, as its thread was given it. */
+export type Report = { worker: string; kind: string; status: string; task: string; body: string };
+
+/** The report a message holds, if it is one. */
+export function report(text: string): Report | null {
+  const found = text.match(
+    /^<worker-report worker="([^"]*)" kind="([^"]*)" status="([^"]*)">\nTask: (.*)\n\n([\s\S]*?)\n<\/worker-report>/,
+  );
+  if (!found) return null;
+  const [, worker, kind, status, task, body] = found;
+  return { worker, kind, status, task, body };
+}
 
 /** The conversation `log` makes, with what was learned in it (`learned`) where it was learned. */
 export function items(log: Checkpoint[], learned: Memory[]): Item[] {
@@ -262,7 +298,10 @@ export function items(log: Checkpoint[], learned: Memory[]): Item[] {
         .flatMap((part) => (part.type === "text" ? [part.text] : []))
         .join("\n\n")
         .trim();
-      if (text && change.role === "user") {
+      const came = change.role === "user" ? report(text) : null;
+      if (came) {
+        out.push({ kind: "report", key, thread, report: came });
+      } else if (text && change.role === "user") {
         out.push({ kind: "user", key, thread, text, moved: last !== null && last !== thread });
         last = thread;
       } else if (text) out.push({ kind: "reply", key, thread, text });

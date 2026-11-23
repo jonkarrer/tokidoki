@@ -12,6 +12,8 @@
   let provider = $state("anthropic");
   let key = $state("");
   let model = $state("");
+  let jevKey = $state("");
+  let exaKey = $state("");
   let saving = $state(false);
   let error = $state<string | null>(null);
 
@@ -39,7 +41,7 @@
     saving = true;
     error = null;
     try {
-      await core.choose(provider, key.trim() || null, model.trim() || null);
+      await core.choose(provider, key.trim() || null, model.trim() || null, jevKey.trim() || null, exaKey.trim() || null);
       ondone();
     } catch (problem) {
       error = String(problem);
@@ -90,6 +92,33 @@
       <span>Model <em>optional</em></span>
       <input type="text" bind:value={model} placeholder={picked.model} autocomplete="off" spellcheck="false" />
       <small>Leave empty for {picked.name}'s usual model, shown above.</small>
+    </label>
+
+    <label class="field">
+      <span>Jev API key <em>optional, from TypeSafe</em></span>
+      <input
+        type="password"
+        bind:value={jevKey}
+        placeholder={chosen.has_jev_key ? "Saved. Paste a new key to replace it" : "Paste your key"}
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <small
+        >Jev makes the quick decisions (which subject a message belongs to, what to remember and recall, what to hand
+        off) faster and for a fraction of the cost. Create one at console.typesafe.ai/keys.</small
+      >
+    </label>
+
+    <label class="field">
+      <span>Exa API key <em>optional</em></span>
+      <input
+        type="password"
+        bind:value={exaKey}
+        placeholder={chosen.has_exa_key ? "Saved. Paste a new key to replace it" : "Paste your key"}
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <small>Lets Tokidoki hand research to a worker that searches the web. Create one at dashboard.exa.ai.</small>
     </label>
   {/if}
 

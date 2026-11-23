@@ -12,6 +12,7 @@ attention.workspace = true
 context.workspace = true
 inference.workspace = true
 memory.workspace = true
+jev.workspace = true
 serde_json.workspace = true
 state.workspace = true
 

@@ -119,6 +119,10 @@ fn recover_in(tx: &mut Tx, thread: &str, inbox: &mut Inbox, reason: &str) -> Res
 
 /// Starts a run for the oldest queued submission, or, with none queued, the idle countdown.
 fn start_next(tx: &mut Tx, thread: &str, inbox: &mut Inbox) -> Result<()> {
+    // A worker's thread has no idle time: it doesn't dream, and its run ends it.
+    if inbox.queue.is_empty() && crate::is_worker(thread) {
+        return Ok(());
+    }
     if inbox.queue.is_empty() {
         let since = serde_json::json!({ "since": tx.now() });
         inbox.idle = Some(tx.create_task_named(IDLE, thread, since, TaskOptions::default())?);
@@ -194,6 +198,10 @@ fn finish(
     }
     for id in ended {
         settle(tx, thread, &id, settled.clone())?;
+    }
+    // A worker's report goes back to the thread that asked for it (unless it was stopped).
+    if crate::is_worker(thread) {
+        crate::workers::ended(tx, thread, &settled, withdraw)?;
     }
     start_next(tx, thread, inbox)
 }

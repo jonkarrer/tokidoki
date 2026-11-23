@@ -13,6 +13,7 @@ import type {
   Sent,
   Submission,
   ThreadSummary,
+  Worker,
 } from "../../../crates/interface/protocol";
 
 // The protocol's types are generated from the Rust (`just types`), never written here.
@@ -30,6 +31,7 @@ export type {
   Submission,
   ThreadPhase,
   ThreadSummary,
+  Worker,
 } from "../../../crates/interface/protocol";
 
 export type CoreEvent = Event;
@@ -45,14 +47,21 @@ export type UpdateStatus =
 
 /** A provider the user can choose (src-tauri/src/lib.rs). */
 export type ProviderChoice = { id: string; name: string; keys_at: string; model: string; has_key: boolean };
-export type Chosen = { provider: string; model: string | null; providers: ProviderChoice[] };
+export type Chosen = {
+  provider: string;
+  model: string | null;
+  providers: ProviderChoice[];
+  has_jev_key: boolean;
+  has_exa_key: boolean;
+};
 
 export const core = {
   status: () => invoke<Status>("status"),
   chosen: () => invoke<Chosen>("chosen"),
-  /** Runs on `provider` from now on. A `null` key keeps the one there is; a `null` model is the provider's usual. */
-  choose: (provider: string, key: string | null, model: string | null) =>
-    invoke<Status>("choose", { provider, key, model }),
+  /** Runs on `provider` from now on. A `null` key keeps the one there is; a `null` model is the provider's usual.
+      `jevKey` (TypeSafe, for Jev) and `exaKey` (for research workers): `null` keeps the one there is. */
+  choose: (provider: string, key: string | null, model: string | null, jevKey: string | null, exaKey: string | null) =>
+    invoke<Status>("choose", { provider, key, model, jevKey, exaKey }),
   send: (text: string, thread: string | null) =>
     invoke<Sent>("send", { text, thread, steer: false, requestId: crypto.randomUUID() }),
   threads: () => invoke<ThreadSummary[]>("threads"),
@@ -69,6 +78,9 @@ export const core = {
   /** A new note, or with `id` a change to one. */
   writeNote: (id: number | null, draft: NoteDraft) => invoke<Note>("write_note", { id, draft }),
   deleteNote: (id: number) => invoke<void>("delete_note", { id }),
+  /** Every worker there has been, latest first. */
+  workers: () => invoke<Worker[]>("workers"),
+  cancelWorker: (id: string) => invoke<boolean>("cancel_worker", { id }),
   onEvent: (handler: (event: CoreEvent) => void) => listen<CoreEvent>("tokidoki:event", (e) => handler(e.payload)),
 
   version: () => invoke<string>("app_version"),

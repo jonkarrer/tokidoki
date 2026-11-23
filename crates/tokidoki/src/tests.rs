@@ -118,6 +118,8 @@ fn parts(replies: Vec<Reply>, store: Sqlite) -> (Parts<Script>, Arc<Script>) {
         },
         speakers: vec!["owner".into()],
         journal: None,
+        exa: None,
+        review: None,
     };
     (parts, script)
 }
@@ -622,4 +624,186 @@ async fn the_timeline_is_every_threads_turns_as_one_conversation() {
             .iter()
             .all(|t| t.phase == interface::ThreadPhase::Hot)
     );
+}
+
+/// Answers a research worker with `found`; everything else from `script`, in order.
+struct Split {
+    script: Script,
+    found: &'static str,
+}
+
+impl Model for Split {
+    async fn chat(&self, ctx: &Context) -> Result<Response> {
+        let worker = ctx.system.as_deref() == Some(worker_tools::RESEARCH_PROMPT);
+        if !worker {
+            return self.script.chat(ctx).await;
+        }
+        Ok(Response {
+            message: Message::assistant(self.found),
+            input_tokens: 0,
+            output_tokens: 0,
+            stop: inference::Stop::Done,
+        })
+    }
+}
+
+/// Research handed to a worker comes back to the conversation by itself; the worker's thread
+/// stays out of it.
+#[tokio::test]
+async fn research_goes_to_a_worker_and_comes_back() {
+    let (parts, _) = parts(Vec::new(), Sqlite::memory().unwrap());
+    let script = Script {
+        replies: Mutex::new(
+            vec![
+                Reply::Call(
+                    "delegate",
+                    json!({ "task": "Find the population of Lisbon." }),
+                ),
+                Reply::Text("I'm on it."),
+                Reply::Text("Lisbon has about 545,000 people."),
+            ]
+            .into(),
+        ),
+        ..Script::default()
+    };
+    let model = Arc::new(Split {
+        script,
+        found: "About 545,000 people (2024). Sources: https://example.com",
+    });
+    let parts = Parts {
+        model,
+        exa: Some(exa::Exa::new("unused").base("http://127.0.0.1:9")),
+        store: parts.store,
+        mind: parts.mind,
+        router: parts.router,
+        memory: parts.memory,
+        scope: parts.scope,
+        notes: parts.notes,
+        tools: parts.tools,
+        system: parts.system,
+        settings: parts.settings,
+        speakers: parts.speakers,
+        journal: parts.journal,
+        review: parts.review,
+    };
+    let tokidoki = Tokidoki::build(parts).unwrap();
+    let mut events = tokidoki.events();
+    let sent = tokidoki
+        .send(me("How many people live in Lisbon?"))
+        .await
+        .unwrap();
+    assert_eq!(
+        settled(&tokidoki, &sent.submission).await.answer.as_deref(),
+        Some("I'm on it.")
+    );
+
+    let delivered = |e: &Event| matches!(e, Event::Worker { worker } if worker.delivery.is_some());
+    let seen = until(&mut events, delivered).await;
+    let Some(Event::Worker { worker }) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(worker.status, interface::WorkerStatus::Done);
+    assert_eq!(worker.delivery, Some(interface::Delivery::Delivered));
+    assert_eq!(worker.parent, sent.thread);
+    assert!(worker.report.as_deref().unwrap().contains("545,000"));
+    let answered = |e: &Event| {
+        matches!(e, Event::Checkpoint { change: Change::Message { role: interface::Role::Assistant, content }, .. }
+        if matches!(&content[0], Content::Text { text } if text.contains("Lisbon has about")))
+    };
+    until(&mut events, answered).await;
+
+    let owner = Speaker::owner();
+    assert_eq!(tokidoki.workers(&owner).unwrap().len(), 1);
+    let threads: Vec<String> = tokidoki
+        .threads()
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(threads, std::slice::from_ref(&sent.thread));
+    let timeline = tokidoki.timeline(None, 10).unwrap();
+    assert!(
+        timeline
+            .iter()
+            .all(|e| matches!(e, Event::Checkpoint { thread, .. } if *thread == sent.thread))
+    );
+}
+
+/// A research question on real models (Anthropic's cheapest, with Jev and Exa: their keys in
+/// the environment): handed to a worker, answered at once with "on it", and the worker's
+/// sourced report comes back by itself.
+#[tokio::test]
+#[ignore = "calls Anthropic, Jev and Exa"]
+async fn research_on_real_models() {
+    let root = Scratch::new("research");
+    let key = std::env::var("ANTHROPIC_API_KEY").expect("set ANTHROPIC_API_KEY");
+    let mut config = Config::new(&root.0, Vendor::Anthropic, key).with_env();
+    let (model, router_model) = Config::cheap_models(Vendor::Anthropic);
+    (config.model, config.router_model) = (model.into(), router_model.into());
+    config.journal = false;
+    assert!(
+        config.exa_key.is_some() && config.jev_key.is_some(),
+        "set EXA_API_KEY and TYPESAFE_API_KEY"
+    );
+    let tokidoki = Tokidoki::open(config, Tools::new()).unwrap();
+    let mut events = tokidoki.events();
+    let started = std::time::Instant::now();
+    let sent = tokidoki
+        .send(me(
+            "Could you look into what the current population of Lisbon is, with a source?",
+        ))
+        .await
+        .unwrap();
+    let first = settled(&tokidoki, &sent.submission).await;
+    println!(
+        "first answer in {:?}: {:?}",
+        started.elapsed(),
+        first.answer
+    );
+
+    let delivered = |e: &Event| matches!(e, Event::Worker { worker } if worker.delivery.is_some());
+    let seen = tokio::time::timeout(Duration::from_secs(180), until_long(&mut events, delivered))
+        .await
+        .expect("no report within 3 minutes");
+    let Some(Event::Worker { worker }) = seen.last() else {
+        unreachable!()
+    };
+    println!(
+        "worker {} {:?} in {:?}:\n{}",
+        worker.id,
+        worker.delivery,
+        started.elapsed(),
+        worker.report.as_deref().unwrap_or("")
+    );
+    assert_eq!(worker.status, interface::WorkerStatus::Done);
+    assert!(
+        worker.report.as_deref().unwrap().contains("http"),
+        "the report cites its sources"
+    );
+
+    let answered = |e: &Event| matches!(e, Event::Submission { submission } if submission.thread == sent.thread && submission.id != sent.submission && submission.status == Status::Done);
+    let seen = tokio::time::timeout(Duration::from_secs(60), until_long(&mut events, answered))
+        .await
+        .unwrap();
+    let Some(Event::Submission { submission }) = seen.last() else {
+        unreachable!()
+    };
+    println!(
+        "told the user:\n{}",
+        submission.answer.as_deref().unwrap_or("")
+    );
+    tokidoki.close().await.unwrap();
+}
+
+/// `until`, without its short timeout.
+async fn until_long(events: &mut Events, last: impl Fn(&Event) -> bool) -> Vec<Event> {
+    let mut seen = Vec::new();
+    while let Some(event) = events.recv().await {
+        let done = last(&event);
+        seen.push(event);
+        if done {
+            return seen;
+        }
+    }
+    seen
 }

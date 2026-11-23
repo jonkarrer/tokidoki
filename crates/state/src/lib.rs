@@ -39,10 +39,13 @@ pub enum Event {
     },
     TurnEnded,
     /// Experience looked at every checkpoint before `upto` and brought `recalled` into the
-    /// context, shown as a text block where it happened (never by editing earlier messages).
+    /// context, shown as a text block where it happened (never by editing earlier messages),
+    /// with `advice` for the model when it has some (Jev judged the message work to hand on).
     Considered {
         upto: usize,
         recalled: Vec<Recalled>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        advice: Option<String>,
     },
     /// An incoming message was placed in this thread: by what (rule, search, model) and why.
     /// Kept as training data for a learned router; the model never sees it.
@@ -255,9 +258,18 @@ impl Thread {
         self.record(Event::Replaced { range, with })
     }
 
-    /// Records how far Experience has looked, and what it recalled.
-    pub fn considered(&mut self, upto: usize, recalled: Vec<Recalled>) -> Result<()> {
-        self.record(Event::Considered { upto, recalled })
+    /// Records how far Experience has looked, what it recalled, and its advice.
+    pub fn considered(
+        &mut self,
+        upto: usize,
+        recalled: Vec<Recalled>,
+        advice: Option<String>,
+    ) -> Result<()> {
+        self.record(Event::Considered {
+            upto,
+            recalled,
+            advice,
+        })
     }
 
     /// Where Experience should look from next: just past the last `Considered`.
@@ -392,17 +404,27 @@ fn apply(ctx: &mut Context, event: &Event) {
         Event::Replaced { range, with } => {
             ctx.messages.splice(range.clone(), with.iter().cloned());
         }
-        Event::Considered { recalled, .. } if !recalled.is_empty() => {
-            let lines: Vec<String> = recalled.iter().map(|r| format!("- {}", r.text)).collect();
-            let block = Block::Text {
-                text: format!("<recalled>\n{}\n</recalled>", lines.join("\n")),
-            };
+        Event::Considered {
+            recalled, advice, ..
+        } if !recalled.is_empty() || advice.is_some() => {
+            let mut blocks = Vec::new();
+            if !recalled.is_empty() {
+                let lines: Vec<String> = recalled.iter().map(|r| format!("- {}", r.text)).collect();
+                blocks.push(Block::Text {
+                    text: format!("<recalled>\n{}\n</recalled>", lines.join("\n")),
+                });
+            }
+            if let Some(advice) = advice {
+                blocks.push(Block::Text {
+                    text: format!("<advice>\n{advice}\n</advice>"),
+                });
+            }
             // Joins the user's message (or tool results) it answers; adds one if there is none.
             match ctx.messages.last_mut() {
-                Some(last) if last.role == Role::User => last.content.push(block),
+                Some(last) if last.role == Role::User => last.content.extend(blocks),
                 _ => ctx.messages.push(Message {
                     role: Role::User,
-                    content: vec![block],
+                    content: blocks,
                 }),
             }
         }
@@ -550,7 +572,7 @@ pub(crate) mod tests {
             id: 7,
             text: "The user's name is Jon.".into(),
         }];
-        thread.considered(upto, recalled).unwrap();
+        thread.considered(upto, recalled, None).unwrap();
         assert_eq!(thread.considered_upto(), upto);
 
         let messages = &thread.context().messages;

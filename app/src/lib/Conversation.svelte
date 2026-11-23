@@ -3,7 +3,16 @@
   import Lines from "./Lines.svelte";
   import { render } from "./markdown";
   import Presence from "./Presence.svelte";
-  import { answering, app, items, loadEarlier, send, stop, type Presence as Doing } from "./state.svelte";
+  import {
+    answering,
+    app,
+    cancelWorker,
+    items,
+    loadEarlier,
+    send,
+    stop,
+    type Presence as Doing,
+  } from "./state.svelte";
 
   // The one conversation: everything said, whatever thread it went to, the replies being
   // written, and where to write the next message. Tokidoki files each message with the
@@ -15,6 +24,8 @@
 
   const lines = $derived(items(app.log, app.memories));
   const busy = $derived(answering(app.log));
+  /** Work handed off and not back yet. */
+  const looking = $derived(app.workers.filter((worker) => worker.status === "running"));
   /** Every thread at work: what it's doing and what it has written so far. */
   const working = $derived(
     busy.map((thread) => {
@@ -57,7 +68,7 @@
     if (scroller) pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
   }
   $effect(() => {
-    void [lines.length, working.map((w) => w.text + w.doing?.kind).join(), app.queued.length];
+    void [lines.length, working.map((w) => w.text + w.doing?.kind).join(), app.queued.length, looking.length];
     if (pinned) tick().then(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
   });
   $effect(() => {
@@ -125,6 +136,13 @@
         {#if now.doing && now.doing.kind !== "writing"}
           <p class="working"><Presence doing={now.doing} size={18} /> {label(now.doing)}</p>
         {/if}
+      {/each}
+      {#each looking as worker (worker.id)}
+        <p class="looking">
+          <Presence doing={{ kind: "tool", name: worker.kind }} size={18} />
+          <span>Looking into: {worker.task}</span>
+          <button onclick={() => cancelWorker(worker.id)}>Stop</button>
+        </p>
       {/each}
       {#each app.queued as waiting (waiting.id)}
         <p class="said waiting">{waiting.text} <span>Sends after this answer</span></p>
@@ -204,6 +222,32 @@
     margin: 12px 0 0;
     color: var(--muted);
     font-size: 13px;
+  }
+  /* Work handed off: the same quiet line as what it is doing now, with a way to stop it. */
+  .looking {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .looking span {
+    flex: 1;
+    min-width: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .looking button {
+    flex: none;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .looking button:hover {
+    color: var(--danger);
   }
   .problem {
     margin: 12px 0 0;

@@ -18,6 +18,8 @@ state = { path = "crates/state" }
 inference = { path = "crates/inference" }
 memory = { path = "crates/memory" }
 notes = { path = "crates/notes" }
+jev = { path = "crates/jev" }
+exa = { path = "crates/exa" }
 attention = { path = "crates/attention" }
 engine = { path = "crates/engine" }
 experience = { path = "crates/experience" }

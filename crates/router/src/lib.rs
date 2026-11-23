@@ -9,22 +9,28 @@
 //! thread is then loaded in full (`Thread::load`); the one thread read directly is the hot one
 //! the user is in, which hasn't dreamed a card yet: its last few messages.
 //!
-//! A model call on every input would be expensive, so it decides in code first, in tiers, and
+//! A model call on every input would be expensive, so it decides cheaply first, in tiers, and
 //! stops at the first that is sure:
 //!
-//! 1. Cues: "new topic", "yes, do it". Pattern rules.
-//! 2. Continuity: the user is in a hot thread and the input shares words with it.
-//! 3. Search: keyword coverage of the cards (IDF), decisive by a margin; or two searches
+//! 1. Cues: "new topic", "yes, do it". Pattern rules. And with no threads yet, a new one.
+//! 2. Classifier: Jev (`JevClassifier`), when there is a key for it: a structured decision
+//!    in a few hundred milliseconds for a fraction of a cent, so it decides everything the
+//!    cues leave, the hot thread included (only a reply too short to change the subject,
+//!    "which one?", stays without asking). Word overlap can't tell a change of subject from
+//!    a follow-up; Jev can. Taken when it is sure enough, else on to the tiers it replaces:
+//! 3. Continuity: the user is in a hot thread and the input shares words with it.
+//! 4. Search: keyword coverage of the cards (IDF), decisive by a margin; or two searches
 //!    (coverage, and BM25 over every card) agreeing on one thread.
-//! 4. Nothing in common: the input shares no word with any card and doesn't look back at
+//! 5. Nothing in common: the input shares no word with any card and doesn't look back at
 //!    anything, so it's a new thread.
-//! 5. Classifier: a trained model run locally (e.g. a fine-tuned BERT), when one is set.
 //! 6. Model: a fast model, only for what's left: inputs with some evidence for a thread, or
 //!    that look back at something no card matches.
 
+mod classify;
 pub mod cues;
 pub mod search;
 
+pub use classify::JevClassifier;
 pub use cues::{RouteCue, RouteDetector, RouteSignal};
 
 use std::collections::HashSet;
@@ -54,6 +60,9 @@ const SEARCH_MIN: f64 = 0.5;
 const SEARCH_MARGIN: f64 = 1.5;
 /// Coverage this high is enough when the all-cards search agrees on the same thread.
 const AGREE_MIN: f64 = 0.25;
+/// Threads the classifier chooses among: the last one and the most recent. It costs little
+/// per thread, so more than the model gets.
+const CLASSIFIER_CANDIDATES: usize = 10;
 /// Threads the model chooses among.
 const ROUTE_CANDIDATES: usize = 5;
 /// Messages read from the hot thread to tell whether the user is still on its subject.
@@ -151,12 +160,31 @@ impl Route {
     }
 }
 
-/// A trained classifier run locally, between search and the model: cheap per input once
-/// trained. The router's logged decisions (`Event::Routed` in each thread) are its training data.
+/// A cheap decider between search and the model: Jev (`JevClassifier`), or a classifier trained on
+/// the router's logged decisions (`Event::Routed` in each thread).
 pub trait Classifier: Send + Sync {
     /// The candidate this input continues (`None` for a new thread) and a confidence 0–1;
     /// `None` when it can't tell.
-    fn classify(&self, input: &Input, candidates: &[&ThreadView]) -> Option<(Option<String>, f32)>;
+    fn classify<'a>(
+        &'a self,
+        input: &'a Input,
+        candidates: &'a [Candidate<'a>],
+    ) -> ClassifyFuture<'a>;
+}
+
+pub type ClassifyFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<(Option<String>, f32)>> + Send + 'a>>;
+
+/// A thread an input may continue, as a classifier is shown it.
+#[derive(Debug, Clone)]
+pub struct Candidate<'a> {
+    pub view: &'a ThreadView,
+    /// What it is about: its title and card, or, before it has a card, its last messages.
+    pub about: String,
+    /// How long since the user last talked in it.
+    pub idle: Duration,
+    /// Whether it is where the user was last.
+    pub last: bool,
 }
 
 pub struct Router<A> {
@@ -289,10 +317,36 @@ impl<A: Api> Router<A> {
         if threads.is_empty() {
             return Ok(Route::new(By::Rule, "no earlier threads"));
         }
-
-        // 2. Continuity: stay in the hot thread unless the input is self-contained and shares
-        // nothing with it (a silent change of subject).
         let last_hot = last.filter(|t| t.phase == Phase::Hot && !any_new);
+
+        // 2. Classifier: everything else, among the last thread and the most recent ones.
+        if let Some(classifier) = &self.classifier {
+            if let Some(last) = last_hot.filter(|_| reference.is_none())
+                && terms_of(&input.text).len() < DRIFT_MIN_TERMS
+            {
+                return Ok(Route::cont(
+                    &last.info.id,
+                    By::Rule,
+                    "too short to change the subject",
+                ));
+            }
+            let mut seen = HashSet::new();
+            let pool: Vec<&ThreadView> = last
+                .into_iter()
+                .chain(threads.iter())
+                .filter(|t| seen.insert(t.info.id.as_str()))
+                .take(CLASSIFIER_CANDIDATES)
+                .collect();
+            if let Some(route) = self
+                .classify(classifier.as_ref(), store, input, &pool)
+                .await?
+            {
+                return Ok(route);
+            }
+        }
+
+        // 3. Continuity: stay in the hot thread unless the input is self-contained and shares
+        // nothing with it (a silent change of subject).
         if let Some(last) = last_hot.filter(|_| reference.is_none())
             && still_on_subject(store, last, &input.text)?
         {
@@ -319,7 +373,7 @@ impl<A: Api> Router<A> {
             }
         }
 
-        // 3. Search: decisive coverage, or coverage and BM25 agreeing.
+        // 4. Search: decisive coverage, or coverage and BM25 agreeing.
         let ranked = rank_threads(&query, &pool);
         tracing::debug!(
             query = %query,
@@ -348,7 +402,7 @@ impl<A: Api> Router<A> {
             }
         }
 
-        // 4. Nothing in common, and not looking back at anything: new.
+        // 5. Nothing in common, and not looking back at anything: new.
         let evidence: Vec<&str> = ranked
             .iter()
             .filter(|r| r.1 > 0.0)
@@ -375,25 +429,41 @@ impl<A: Api> Router<A> {
             .take(ROUTE_CANDIDATES)
             .collect();
 
-        // 5. Classifier.
-        if let Some((choice, confidence)) = self
-            .classifier
-            .as_ref()
-            .and_then(|c| c.classify(input, &candidates))
-            .filter(|(_, confidence)| *confidence >= self.classifier_min)
-        {
-            let reason = format!("classified ({confidence:.2})");
-            return Ok(match choice {
-                Some(id) if candidates.iter().any(|t| t.info.id == id) => {
-                    Route::cont(&id, By::Classifier, reason)
-                }
-                Some(_) => fallback,
-                None => Route::new(By::Classifier, reason),
-            });
-        }
-
         // 6. The model.
         Ok(self.ask_model(input, last, &candidates, fallback).await)
+    }
+
+    /// The classifier's route among `candidates`, if it is sure enough of one.
+    async fn classify(
+        &self,
+        classifier: &dyn Classifier,
+        store: &dyn Checkpointer,
+        input: &Input,
+        candidates: &[&ThreadView],
+    ) -> Result<Option<Route>> {
+        let shown = candidates
+            .iter()
+            .map(|view| candidate(store, view, input))
+            .collect::<Result<Vec<_>>>()?;
+        let Some((choice, confidence)) = classifier.classify(input, &shown).await else {
+            return Ok(None);
+        };
+        if confidence < self.classifier_min {
+            tracing::debug!(
+                ?choice,
+                confidence,
+                "classifier unsure; the other tiers decide"
+            );
+            return Ok(None);
+        }
+        let reason = format!("classified ({confidence:.2})");
+        Ok(match choice {
+            Some(id) if candidates.iter().any(|t| t.info.id == id) => {
+                Some(Route::cont(&id, By::Classifier, reason))
+            }
+            Some(_) => None,
+            None => Some(Route::new(By::Classifier, reason)),
+        })
     }
 
     /// The model's pick among `candidates`; `fallback` when it fails or names no candidate.
@@ -455,6 +525,38 @@ fn card_doc(view: &ThreadView) -> String {
         None => view.info.title.clone(),
     }
 }
+
+/// A thread as a classifier is shown it. Before its first dream it has no card, and its title
+/// is only the start of its first message: its last messages say more.
+fn candidate<'a>(
+    store: &dyn Checkpointer,
+    view: &'a ThreadView,
+    input: &Input,
+) -> Result<Candidate<'a>> {
+    let mut about = card_doc(view);
+    if view.card.is_none() {
+        for message in store.recent_messages(&view.info.id, CANDIDATE_MESSAGES)? {
+            let who = match message.role {
+                context::Role::User => "User",
+                context::Role::Assistant => "Assistant",
+            };
+            let text: String = message.text().chars().take(CANDIDATE_CHARS).collect();
+            if !text.trim().is_empty() {
+                about.push_str(&format!("\n{who}: {}", text.trim()));
+            }
+        }
+    }
+    Ok(Candidate {
+        view,
+        about,
+        idle: elapsed(input.now, view.active_at),
+        last: input.last.as_deref() == Some(view.info.id.as_str()),
+    })
+}
+
+/// Messages, and characters of each, that describe a thread with no card yet.
+const CANDIDATE_MESSAGES: usize = 4;
+const CANDIDATE_CHARS: usize = 300;
 
 fn elapsed(now: SystemTime, at: SystemTime) -> Duration {
     now.duration_since(at).unwrap_or_default()
@@ -749,8 +851,8 @@ mod tests {
     struct Always(Option<&'static str>);
 
     impl Classifier for Always {
-        fn classify(&self, _: &Input, _: &[&ThreadView]) -> Option<(Option<String>, f32)> {
-            Some((self.0.map(String::from), 0.9))
+        fn classify<'a>(&'a self, _: &'a Input, _: &'a [Candidate<'a>]) -> ClassifyFuture<'a> {
+            Box::pin(async move { Some((self.0.map(String::from), 0.9)) })
         }
     }
 
@@ -777,6 +879,57 @@ mod tests {
         );
     }
 
+    /// Sure of nothing: the tiers after it decide as if there were no classifier.
+    struct Unsure;
+
+    impl Classifier for Unsure {
+        fn classify<'a>(&'a self, _: &'a Input, _: &'a [Candidate<'a>]) -> ClassifyFuture<'a> {
+            Box::pin(async move { Some((Some("metabase".into()), 0.3)) })
+        }
+    }
+
+    /// With a classifier, the hot thread no longer keeps an input for sharing a word with it:
+    /// the classifier decides. Only an input too short to change the subject stays unasked.
+    #[tokio::test]
+    async fn the_classifier_decides_what_the_cues_leave_even_in_the_hot_thread() {
+        let mut router = router("unused");
+        router.classifier = Some(Box::new(Always(Some("metabase"))));
+        let store = store_with(&[KYOTO, METABASE]);
+        let now = Duration::ZERO;
+        assert_eq!(
+            route(
+                &router,
+                &store,
+                input("Is Gion walkable from the station?", Some("kyoto"), now)
+            )
+            .await,
+            Route::cont("metabase", By::Classifier, "classified (0.90)")
+        );
+        assert_eq!(
+            route(&router, &store, input("Gion, then?", Some("kyoto"), now)).await,
+            Route::cont("kyoto", By::Rule, "too short to change the subject")
+        );
+        assert_eq!(
+            route(
+                &router,
+                &store,
+                input("New topic: pasta tonight?", Some("kyoto"), now)
+            )
+            .await,
+            Route::new(By::Rule, "starts a new topic")
+        );
+
+        router.classifier = Some(Box::new(Unsure));
+        assert_eq!(
+            route(
+                &router,
+                &store,
+                input("Is Gion walkable from the station?", Some("kyoto"), now)
+            )
+            .await,
+            Route::cont("kyoto", By::Rule, "the conversation is still going")
+        );
+    }
     fn key() -> String {
         std::env::var("BASETEN_API_KEY").expect("set BASETEN_API_KEY")
     }
@@ -804,5 +957,44 @@ mod tests {
             (route.target, route.by),
             (Target::Continue("kyoto".into()), By::Model)
         );
+    }
+
+    /// Ambiguous inputs that get past search, routed by Jev (`TYPESAFE_API_KEY`), with no
+    /// model behind it: the router's provider is never called.
+    #[tokio::test]
+    #[ignore = "calls Jev"]
+    async fn jev_routes_what_search_cannot() {
+        let mut router = router("unused");
+        let key = std::env::var("TYPESAFE_API_KEY").expect("set TYPESAFE_API_KEY");
+        router.classifier = Some(Box::new(JevClassifier::new(jev::Jev::new(key))));
+        router.classifier_min = 0.0;
+        let store = store_with(&[KYOTO, METABASE]);
+        let later = Duration::from_secs(3 * 3600);
+        for (text, expected) in [
+            ("Which hotel did we pick for Japan?", Some("kyoto")),
+            (
+                "Did we decide which database user the dashboards connect with?",
+                Some("metabase"),
+            ),
+            (
+                "Remind me what we said about the cherry blossoms",
+                Some("kyoto"),
+            ),
+            (
+                "Which of these do you think we went with, the cheaper one?",
+                None,
+            ),
+        ] {
+            let started = std::time::Instant::now();
+            let route = route(&router, &store, input(text, Some("metabase"), later)).await;
+            println!("{text:?} → {route:?} in {:?}", started.elapsed());
+            if let Some(thread) = expected {
+                assert_eq!(
+                    (route.target, route.by),
+                    (Target::Continue(thread.into()), By::Classifier),
+                    "{text}"
+                );
+            }
+        }
     }
 }
