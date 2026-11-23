@@ -89,6 +89,16 @@ pub enum Replay {
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 
+/// One call of a tool: what the model asked for, and in which thread. `id` is the call's own
+/// and stays the same when a crash makes it run again, so a tool that writes something can
+/// key it by `id` and write it once however often it runs.
+#[derive(Debug, Clone)]
+pub struct Call {
+    pub thread: String,
+    pub id: String,
+    pub arguments: Value,
+}
+
 /// A tool the model can call. Its result is what the model sees; an error becomes an error
 /// result.
 pub trait Tool: Send + Sync + 'static {
@@ -98,7 +108,7 @@ pub trait Tool: Send + Sync + 'static {
         Replay::Unsafe
     }
 
-    fn execute(&self, arguments: Value) -> ToolFuture<'_>;
+    fn execute(&self, call: Call) -> ToolFuture<'_>;
 }
 
 /// The tools this process can run, by name. Which tools a thread offers the model is the
@@ -130,24 +140,33 @@ impl Tools {
     }
 }
 
-/// What a new thread starts with, set in the commit that admits its first input.
+/// What threads run with: a system prompt and the tools offered to the model. A thread is
+/// brought up to date in the commit that admits each input to it, so a new thread starts with
+/// them and one already under way picks up a prompt or tool added since. Tools are added or
+/// changed, never removed, and without a system prompt a thread keeps its own.
 #[derive(Debug, Default)]
-pub struct NewThreads {
+pub struct ThreadSetup {
     pub system: Option<String>,
     pub tools: Vec<context::Tool>,
 }
 
-impl NewThreads {
-    fn set_up(&self, tx: &mut Tx, thread: &str) -> Result<()> {
+impl ThreadSetup {
+    fn apply(&self, tx: &mut Tx, thread: &str) -> Result<()> {
         let thread = tx.thread(thread)?;
-        if !thread.checkpoints().is_empty() {
-            return Ok(());
-        }
-        if let Some(system) = self.system.clone() {
+        let context = thread.context();
+        let system = self
+            .system
+            .clone()
+            .filter(|system| context.system.as_ref() != Some(system));
+        let tools: Vec<context::Tool> = (self.tools.iter())
+            .filter(|tool| !context.tools.contains(tool))
+            .cloned()
+            .collect();
+        if let Some(system) = system {
             thread.set_system(system)?;
         }
-        for tool in &self.tools {
-            thread.register(tool.clone())?;
+        for tool in tools {
+            thread.register(tool)?;
         }
         Ok(())
     }
@@ -357,15 +376,15 @@ impl Settled {
 #[derive(Clone)]
 pub struct Agent {
     engine: Engine,
-    new_threads: Arc<NewThreads>,
+    setup: Arc<ThreadSetup>,
 }
 
 impl Agent {
-    /// Threads this agent starts get `new_threads`' system prompt and tools.
-    pub fn new(engine: Engine, new_threads: NewThreads) -> Self {
+    /// The threads this agent admits inputs to run with `setup`.
+    pub fn new(engine: Engine, setup: ThreadSetup) -> Self {
         Self {
             engine,
-            new_threads: Arc::new(new_threads),
+            setup: Arc::new(setup),
         }
     }
 
@@ -431,7 +450,7 @@ impl Agent {
         let text = draft.text.clone();
         let sent = self
             .engine
-            .commit(|tx| admit(tx, &self.new_threads, place, draft))?;
+            .commit(|tx| admit(tx, &self.setup, place, draft))?;
         match &sent.route {
             // The router traced its decision, with the text.
             Some(route) => tracing::info!(
@@ -491,7 +510,7 @@ enum Place {
 
 /// Admits an input to its thread (named, routed to, or new), noting a route there. A request
 /// ID already submitted (by a `send` since the caller checked) changes nothing.
-fn admit(tx: &mut Tx, new_threads: &NewThreads, place: Place, draft: Draft) -> Result<Sent> {
+fn admit(tx: &mut Tx, setup: &ThreadSetup, place: Place, draft: Draft) -> Result<Sent> {
     if let Some(submission) = inbox::existing(tx, &draft)? {
         return Ok(Sent {
             thread: inbox::submission(tx, &submission)?.shown.thread,
@@ -506,7 +525,7 @@ fn admit(tx: &mut Tx, new_threads: &NewThreads, place: Place, draft: Draft) -> R
             router::Target::New => (new_thread(tx)?, Some(route)),
         },
     };
-    new_threads.set_up(tx, &thread)?;
+    setup.apply(tx, &thread)?;
     if let Some(route) = &route {
         tx.thread(&thread)?
             .routed(route.by.as_str(), &route.reason)?;

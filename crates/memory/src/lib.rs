@@ -12,7 +12,7 @@
 
 pub mod index;
 
-pub use index::{Document, Fts, Index};
+pub use index::{Document, Fts, Index, fts_query};
 
 use std::fmt;
 use std::path::Path;

@@ -6,26 +6,29 @@
 //! methods with `interface` types and gets `interface` types back: `send` an input, follow
 //! `events` (or `wait`), read `threads` and `history`, `abort`, give `feedback`; and see what
 //! it remembers (`memories`), tell it something (`remember`), correct it (`revise`), have it
-//! `forget` one thing or `wipe` all of it. Where inputs come from and where outputs go is the embedding code's business,
-//! not tokidoki's.
+//! `forget` one thing or `wipe` all of it; and keep the user's `notes` (`write_note`,
+//! `delete_note`), which the model saves and reads too, when asked. Where inputs come from
+//! and where outputs go is the embedding code's business, not tokidoki's.
 //!
 //! Who may speak is decided here: every input names its `Speaker`, and only the configured
 //! speakers are let in, all as the one user whose memory scope this instance reads and
 //! writes. (Several users, each with their own scope, is a later step.)
 
 mod events;
+mod note_tools;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent::{Agent, Live, Mind, Model, NewThreads, ProviderModel};
+use agent::{Agent, Live, Mind, Model, ProviderModel, ThreadSetup};
 use anyhow::{Context as _, Result};
 use engine::{Engine, Registry};
 use experience::{Experience, Scopes};
 use inference::providers::AnyApi;
 use inference::{Provider, Request};
-use interface::{Feedback, Input, Rejected, Sent, Speaker, Submission, ThreadSummary};
+use interface::{Feedback, Input, Rejected, Sent, Speaker, Submission, ThreadPhase, ThreadSummary};
 use memory::{Body, Memory, Scope, Write};
+use notes::Notes;
 use router::Router;
 use state::{Checkpointer, Sqlite};
 use tokio::sync::mpsc;
@@ -45,7 +48,7 @@ the conversation are added to it for you. Be direct and concise.";
 
 #[derive(Clone)]
 pub struct Config {
-    /// Holds `tokidoki.db` (state), `tokidoki.journal.db` and `memory.db`.
+    /// Holds `tokidoki.db` (state), `tokidoki.journal.db`, `memory.db` and `notes.db`.
     pub data: PathBuf,
     /// Whose memory this is: the scope every speaker reads and writes.
     pub user: String,
@@ -208,6 +211,10 @@ impl Config {
     pub fn memory_path(&self) -> PathBuf {
         self.data.join(telemetry::MEMORY_FILE)
     }
+
+    pub fn notes_path(&self) -> PathBuf {
+        self.data.join(telemetry::NOTES_FILE)
+    }
 }
 
 /// An environment variable that says something.
@@ -224,6 +231,8 @@ pub struct Parts<M> {
     /// What it remembers, and whose memories those are.
     pub memory: Arc<Memory>,
     pub scope: Scope,
+    /// The user's notes; `build` adds the tools for them to `tools`.
+    pub notes: Arc<Notes>,
     pub tools: Tools,
     /// What every new thread starts with (with `tools` registered).
     pub system: Option<String>,
@@ -246,6 +255,7 @@ struct Inner {
     router: Router<AnyApi>,
     memory: Arc<Memory>,
     scope: Scope,
+    notes: Arc<Notes>,
     store: Arc<Sqlite>,
     speakers: Vec<String>,
     journal: Option<telemetry::Recording>,
@@ -294,15 +304,18 @@ impl Tokidoki {
         let _recorded = span_of(&journal).entered();
         let store = Arc::new(Sqlite::open(config.state_path())?);
         let memory = Arc::new(Memory::open(config.memory_path())?);
+        let notes = Arc::new(Notes::open(config.notes_path())?);
         let scope = Scope::user(&config.user);
         let answers = || Request::new(config.model.clone()).effort(config.effort);
         let provider = || Provider::of(config.provider, &config.key);
-        let router = Router::new(
+        let mut router = Router::new(
             provider(),
             Request::new(config.router_model.clone()).thinking(false),
             memory.clone(),
             vec![scope.clone()],
         );
+        // A thread cools when it dreams.
+        router.dream_after = std::time::Duration::from_millis(config.agent.dream_after_ms);
         let experience = Experience::new(
             provider(),
             answers(),
@@ -323,6 +336,7 @@ impl Tokidoki {
             router,
             memory,
             scope,
+            notes,
             tools,
             system: config.system,
             settings: config.agent,
@@ -340,21 +354,33 @@ impl Tokidoki {
     fn assemble<M: Model>(parts: Parts<M>, asleep: Option<String>) -> Result<Self> {
         // The engine keeps the span it is opened in, for everything it runs.
         let _recorded = span_of(&parts.journal).entered();
-        let new_threads = NewThreads {
-            system: parts.system,
-            tools: parts.tools.specs(),
+        // Every thread can keep the user's notes, and is told when to.
+        let mut tools = parts.tools;
+        note_tools::add(&mut tools, &parts.notes);
+        let system = match parts.system {
+            Some(system) => format!("{system}\n\n{}", note_tools::PROMPT),
+            None => note_tools::PROMPT.to_string(),
+        };
+        let setup = ThreadSetup {
+            system: Some(system),
+            tools: tools.specs(),
         };
         let live = Live::default();
-        // Whatever changes memory (answering, dreaming, the user) is shown as it happens.
+        // Whatever changes memory (answering, dreaming, the user) or a note is shown as it
+        // happens.
         let shown = live.clone();
         parts
             .memory
             .watch(move |change| shown.show(events::memory_change(change)));
+        let shown = live.clone();
+        parts
+            .notes
+            .watch(move |change| shown.show(note_tools::change(change)));
         let mut registry = Registry::new();
         agent::register(
             &mut registry,
             parts.model,
-            parts.tools,
+            tools,
             parts.mind,
             parts.settings,
             live.clone(),
@@ -365,11 +391,12 @@ impl Tokidoki {
         }
         Ok(Self {
             inner: Arc::new(Inner {
-                agent: Agent::new(engine, new_threads),
+                agent: Agent::new(engine, setup),
                 live,
                 router: parts.router,
                 memory: parts.memory,
                 scope: parts.scope,
+                notes: parts.notes,
                 store: parts.store,
                 speakers: parts.speakers,
                 journal: parts.journal,
@@ -441,19 +468,53 @@ impl Tokidoki {
 
     /// Every thread, most recently active first.
     pub fn threads(&self) -> Result<Vec<ThreadSummary>> {
-        let threads = self.inner.store.threads()?.into_iter();
-        threads
-            .map(|info| {
-                Ok(ThreadSummary {
-                    about: self.inner.memory.card(&info.id)?.map(|card| card.text),
-                    id: info.id,
-                    title: info.title,
-                    turns: info.turns,
-                    created_at: telemetry::time::ms(info.created_at),
-                    active_at: telemetry::time::ms(info.active_at),
-                })
+        let now = std::time::SystemTime::now();
+        let views = self.inner.router.threads(self.inner.store.as_ref(), now)?;
+        Ok(views
+            .into_iter()
+            .map(|view| ThreadSummary {
+                about: view.card.map(|card| card.text),
+                resume: view.resume.map(|resume| resume.text),
+                phase: match view.phase {
+                    router::Phase::Hot => ThreadPhase::Hot,
+                    router::Phase::Cool => ThreadPhase::Cool,
+                    router::Phase::Settled => ThreadPhase::Settled,
+                },
+                id: view.info.id,
+                title: view.info.title,
+                turns: view.info.turns,
+                created_at: telemetry::time::ms(view.info.created_at),
+                active_at: telemetry::time::ms(view.info.active_at),
             })
-            .collect()
+            .collect())
+    }
+
+    /// The conversation as the user sees it: every thread's turns as one, in the order they
+    /// started, as their checkpoints. The last `turns` of those that started before `before`
+    /// (ms since the epoch; `None` for the latest), so earlier ones can be read page by page.
+    pub fn timeline(&self, before: Option<u64>, turns: usize) -> Result<Vec<interface::Event>> {
+        let engine = self.inner.agent.engine();
+        // (when it started, the thread, its checkpoints) for every turn.
+        let mut all: Vec<(u64, String, Vec<interface::Event>)> = Vec::new();
+        for info in self.inner.store.threads()? {
+            engine.thread(&info.id, |thread| {
+                for checkpoint in thread.checkpoints() {
+                    let event = events::checkpoint(&info.id, checkpoint);
+                    if matches!(checkpoint.event, state::Event::TurnStarted) {
+                        let at = telemetry::time::ms(checkpoint.at);
+                        all.push((at, info.id.clone(), vec![event]));
+                    } else if let Some(turn) = all.last_mut().filter(|t| t.1 == info.id) {
+                        // What happens between turns (routing the next input, dreaming) goes
+                        // with the turn before it; what came before the first, nowhere.
+                        turn.2.push(event);
+                    }
+                }
+            })?;
+        }
+        all.retain(|turn| before.is_none_or(|before| turn.0 < before));
+        all.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let skip = all.len().saturating_sub(turns);
+        Ok(all.into_iter().skip(skip).flat_map(|turn| turn.2).collect())
     }
 
     /// What it remembers, newest first: the current version of each memory.
@@ -510,6 +571,53 @@ impl Tokidoki {
         self.admit(from)?;
         self.inner.memory.wipe(&self.inner.scope)?;
         tracing::info!(speaker = %from.id, "memory wiped by the user");
+        Ok(())
+    }
+
+    /// The user's notes that match `search`: best match first, or, with no query, the most
+    /// recently changed first.
+    pub fn notes(
+        &self,
+        from: &Speaker,
+        search: interface::NoteSearch,
+    ) -> Result<Vec<interface::Note>> {
+        self.admit(from)?;
+        let found = self.inner.notes.search(&notes::Search {
+            query: search.query,
+            tag: search.tag,
+            project: search.project,
+            limit: NOTES_SHOWN,
+        })?;
+        Ok(found.into_iter().map(note_tools::note).collect())
+    }
+
+    /// A new note from the user, or (with `id`) their change to one; it keeps where it came
+    /// from.
+    pub fn write_note(
+        &self,
+        from: &Speaker,
+        id: Option<i64>,
+        draft: interface::NoteDraft,
+    ) -> Result<interface::Note> {
+        let _recorded = self.span().entered();
+        self.admit(from)?;
+        let draft = note_tools::draft(draft);
+        let saved = match id {
+            Some(id) => self.inner.notes.update(id, draft),
+            None => self.inner.notes.add(draft, None),
+        };
+        // What can go wrong is the user's to fix: an empty note, or one deleted meanwhile.
+        let saved = saved.map_err(|error| Rejected(format!("{error:#}")))?;
+        Ok(note_tools::note(saved))
+    }
+
+    /// Deletes the note `id` for good.
+    pub fn delete_note(&self, from: &Speaker, id: i64) -> Result<()> {
+        let _recorded = self.span().entered();
+        self.admit(from)?;
+        if !self.inner.notes.delete(id)? {
+            return Err(Rejected(format!("note {id} is already gone")).into());
+        }
         Ok(())
     }
 
@@ -589,6 +697,9 @@ const STOP_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How many memories `memories` returns at most.
 const MEMORIES_SHOWN: usize = 2_000;
+
+/// How many notes `notes` returns at most.
+const NOTES_SHOWN: usize = 500;
 
 /// A memory's text as the user gave it, trimmed; rejected when empty.
 fn stated(text: &str) -> Result<String> {

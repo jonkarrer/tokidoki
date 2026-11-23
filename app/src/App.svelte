@@ -4,9 +4,11 @@
   import Conversation from "./lib/Conversation.svelte";
   import Keys from "./lib/Keys.svelte";
   import Memory from "./lib/Memory.svelte";
+  import Notes from "./lib/Notes.svelte";
   import Presence from "./lib/Presence.svelte";
+  import Threads from "./lib/Threads.svelte";
   import UpdateCard from "./lib/UpdateCard.svelte";
-  import { app, hasHistory, openThread, show, start } from "./lib/state.svelte";
+  import { answering, app, hasHistory, show, start } from "./lib/state.svelte";
 
   let version = $state("");
 
@@ -18,14 +20,11 @@
     core.version().then((v) => (version = v));
   });
 
-  /** "now", "12 min", "3 h", then the date. */
-  function ago(ms: number) {
-    const minutes = Math.floor((Date.now() - ms) / 60_000);
-    if (minutes < 1) return "now";
-    if (minutes < 60) return `${minutes} min`;
-    if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} h`;
-    return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  }
+  // What Tokidoki is doing in the conversation, shown beside it from anywhere in the app.
+  const doing = $derived.by(() => {
+    const thread = answering(app.log)[0];
+    return thread ? (app.live[thread]?.doing ?? { kind: "thinking" as const }) : null;
+  });
 </script>
 
 {#if app.status === null}
@@ -44,38 +43,30 @@
   <div class="window">
     <nav>
       <div class="titlebar" data-tauri-drag-region></div>
-      <button
-        class="new"
-        class:on={app.view === "conversation" && app.current === null}
-        onclick={() => openThread(null)}>New conversation</button
-      >
-      <button class="memory" class:on={app.view === "memory"} onclick={() => show("memory")}>
-        <span class="mote" class:fresh={app.unseen > 0}></span>
-        <span>Memory</span>
-        <span class="count">{app.unseen > 0 ? `${app.unseen} new` : app.memories.length || ""}</span>
+      <!-- One conversation; the threads it is filed into are under the hood (Threads). -->
+      <button class="place conversation" class:on={app.view === "conversation"} onclick={() => show("conversation")}>
+        <span class="mark">
+          {#if doing}<Presence {doing} size={12} />{:else}<span class="talk"></span>{/if}
+        </span>
+        <span>Conversation</span>
+        <span class="count"></span>
       </button>
-      <ul>
-        {#each app.threads as thread (thread.id)}
-          <li>
-            <button
-              class:on={app.view === "conversation" && app.current === thread.id}
-              title={thread.about}
-              onclick={() => openThread(thread.id)}
-            >
-              <span class="mark">
-                {#if app.live[thread.id]?.doing}<Presence doing={app.live[thread.id].doing} size={12} />{/if}
-              </span>
-              <span class="title">{thread.title}</span>
-              <time>{ago(thread.active_at)}</time>
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <button class="place memory" class:on={app.view === "memory"} onclick={() => show("memory")}>
+        <span class="mark"><span class="mote" class:fresh={app.unseen > 0}></span></span>
+        <span>Memory</span>
+        <span class="count" class:fresh={app.unseen > 0}>{app.unseen > 0 ? `${app.unseen} new` : app.memories.length || ""}</span>
+      </button>
+      <button class="place notes" class:on={app.view === "notes"} onclick={() => show("notes")}>
+        <span class="mark"><span class="leaf"></span></span>
+        <span>Notes</span>
+        <span class="count">{app.notes.length || ""}</span>
+      </button>
       <footer>
         <UpdateCard />
         <div class="foot">
+          <button class:on={app.view === "threads"} onclick={() => show("threads")}>Threads</button>
           <button onclick={() => show("keys")}>Model and key</button>
-          <button onclick={() => core.checkForUpdates()} title="Check for updates">Version {version}</button>
+          <button onclick={() => core.checkForUpdates()} title="Check for updates">v{version}</button>
         </div>
       </footer>
     </nav>
@@ -90,6 +81,10 @@
           /></div>
       {:else if app.view === "memory"}
         <Memory />
+      {:else if app.view === "notes"}
+        <Notes />
+      {:else if app.view === "threads"}
+        <Threads />
       {:else}
         <Conversation />
       {/if}
@@ -138,35 +133,34 @@
     height: 52px;
     flex: none;
   }
-  .new {
-    margin: 0 10px 10px;
-    height: 32px;
-    border-radius: 8px;
-    border: 1px solid var(--line);
-    font-weight: 600;
-    text-align: center;
-  }
-  .new.on {
-    background: var(--raised);
-  }
-  .memory {
+  .place {
     display: grid;
     grid-template-columns: 14px 1fr auto;
     align-items: center;
     gap: 6px;
-    margin: 0 6px 10px;
+    margin: 0 6px 2px;
     padding: 7px 8px 7px 4px;
     border-radius: 7px;
     text-align: left;
   }
-  .memory:hover {
+  .place:hover {
     background: color-mix(in srgb, var(--raised) 55%, transparent);
   }
-  .memory.on {
+  .place.on {
     background: var(--raised);
   }
+  .mark {
+    display: grid;
+    place-items: center;
+  }
+  /* The conversation: a speech mark, indigo like what the user says. */
+  .talk {
+    width: 8px;
+    height: 8px;
+    border-radius: 50% 50% 50% 0;
+    border: 1.5px solid var(--indigo);
+  }
   .mote {
-    justify-self: center;
     width: 7px;
     height: 7px;
     border-radius: 50%;
@@ -175,55 +169,25 @@
   .mote.fresh {
     background: var(--plum);
   }
+  /* A note: a page with a folded corner, small. */
+  .leaf {
+    width: 8px;
+    height: 10px;
+    border: 1.5px solid var(--indigo);
+    border-radius: 1px 4px 1px 1px;
+  }
   .count {
     color: var(--muted);
     font-size: 11.5px;
     font-variant-numeric: tabular-nums;
   }
-  .fresh ~ .count {
+  .count.fresh {
     color: var(--plum);
     font-weight: 600;
   }
-  ul {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    margin: 0;
-    padding: 0 6px;
-    list-style: none;
-  }
-  li button {
-    width: 100%;
-    display: grid;
-    grid-template-columns: 14px 1fr auto;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 8px 7px 4px;
-    border-radius: 7px;
-    text-align: left;
-  }
-  li button:hover {
-    background: color-mix(in srgb, var(--raised) 55%, transparent);
-  }
-  li button.on {
-    background: var(--raised);
-  }
-  .mark {
-    display: grid;
-    place-items: center;
-  }
-  .title {
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-  time {
-    color: var(--muted);
-    font-size: 11.5px;
-    font-variant-numeric: tabular-nums;
-  }
   footer {
     flex: none;
+    margin-top: auto;
     padding: 8px 10px 10px;
     display: flex;
     flex-direction: column;
@@ -235,7 +199,8 @@
     color: var(--muted);
     font-size: 12px;
   }
-  .foot button:hover {
+  .foot button:hover,
+  .foot button.on {
     color: var(--ink);
   }
   main {

@@ -123,7 +123,7 @@ const STOPWORDS: &[&str] = &[
 ];
 
 /// The query's words worth matching, each quoted so FTS5 reads it as a plain term, OR'd.
-pub(crate) fn fts_query(query: &str) -> Option<String> {
+pub fn fts_query(query: &str) -> Option<String> {
     let lower = query.to_lowercase();
     let mut terms: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())

@@ -3,7 +3,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import type { Event, Memory, MemoryChange, Sent, Submission, ThreadSummary } from "../../../crates/interface/protocol";
+import type {
+  Event,
+  Memory,
+  MemoryChange,
+  Note,
+  NoteDraft,
+  NoteSearch,
+  Sent,
+  Submission,
+  ThreadSummary,
+} from "../../../crates/interface/protocol";
 
 // The protocol's types are generated from the Rust (`just types`), never written here.
 export type {
@@ -12,8 +22,13 @@ export type {
   Doing,
   Memory,
   MemoryChange,
+  Note,
+  NoteChange,
+  NoteDraft,
+  NoteSearch,
   Sent,
   Submission,
+  ThreadPhase,
   ThreadSummary,
 } from "../../../crates/interface/protocol";
 
@@ -42,12 +57,18 @@ export const core = {
     invoke<Sent>("send", { text, thread, steer: false, requestId: crypto.randomUUID() }),
   threads: () => invoke<ThreadSummary[]>("threads"),
   history: (thread: string, since: number) => invoke<Checkpoint[]>("history", { thread, since }),
+  /** Every thread's last `turns` turns that started before `before` (ms), as one conversation. */
+  timeline: (before: number | null, turns: number) => invoke<Checkpoint[]>("timeline", { before, turns }),
   abort: (thread: string) => invoke<boolean>("abort", { thread }),
   memories: () => invoke<Memory[]>("memories"),
   remember: (text: string) => invoke<Memory>("remember", { text }),
   reviseMemory: (id: number, text: string) => invoke<Memory>("revise_memory", { id, text }),
   forgetMemory: (id: number) => invoke<void>("forget_memory", { id }),
   wipeMemory: () => invoke<void>("wipe_memory"),
+  notes: (search: NoteSearch) => invoke<Note[]>("notes", { search }),
+  /** A new note, or with `id` a change to one. */
+  writeNote: (id: number | null, draft: NoteDraft) => invoke<Note>("write_note", { id, draft }),
+  deleteNote: (id: number) => invoke<void>("delete_note", { id }),
   onEvent: (handler: (event: CoreEvent) => void) => listen<CoreEvent>("tokidoki:event", (e) => handler(e.payload)),
 
   version: () => invoke<string>("app_version"),

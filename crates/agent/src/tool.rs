@@ -6,7 +6,7 @@ use engine::{Next, Runtime, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Replay, Tools};
+use crate::{Call, Replay, Tools};
 
 pub struct ToolCall {
     tools: Tools,
@@ -98,7 +98,11 @@ async fn execute(rt: &Runtime<ToolCall>, tool: &dyn crate::Tool) -> Result<ToolO
     let call = rt.input();
     let started = std::time::Instant::now();
     let result = tokio::select! {
-        result = tool.execute(call.arguments.clone()) => result,
+        result = tool.execute(Call {
+            thread: rt.thread_id().to_string(),
+            id: call.call_id.clone(),
+            arguments: call.arguments.clone(),
+        }) => result,
         _ = rt.cancelled() => bail!("cancelled"),
     };
     let output = match result {

@@ -180,6 +180,24 @@ pub struct ThreadSummary {
     pub created_at: u64,
     /// The last message, ms since the epoch.
     pub active_at: u64,
+    /// How warm it is, which is how readily a new input goes to it.
+    pub phase: ThreadPhase,
+    /// Where it left off, written when it last settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+}
+
+/// A thread is hot while the user talks in it, cool once idle long enough to dream (a new
+/// input then goes to it only when it plainly belongs there), and settled after a long idle,
+/// when its context is reset to a short note of where it left off. Talking in it again makes
+/// it hot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadPhase {
+    Hot,
+    Cool,
+    Settled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +293,8 @@ pub enum Event {
     /// What tokidoki remembers changed: it learned something, corrected or dropped a memory
     /// (while answering, or tidying up while idle), or the user did.
     Memory { change: MemoryChange },
+    /// A note was saved, changed or deleted: by the user, or by the model when asked.
+    Note { change: NoteChange },
     /// Events were missed (the client fell behind): re-read what it shows.
     Lagged,
 }
@@ -335,6 +355,65 @@ pub enum MemoryChange {
     Described {
         thread: String,
         about: String,
+    },
+}
+
+/// One of the user's notes: kept as written, apart from memory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Note {
+    pub id: i64,
+    pub title: String,
+    /// Markdown.
+    pub body: String,
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub people: Vec<String>,
+    /// The thread it was saved from, when the model saved it there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    /// Ms since the epoch.
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// A note as the user writes it. An empty title takes the body's first line.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct NoteDraft {
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub people: Vec<String>,
+}
+
+/// Which notes to list. An empty query lists the most recently changed first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct NoteSearch {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NoteChange {
+    /// New, or changed.
+    Saved {
+        note: Note,
+    },
+    Deleted {
+        id: i64,
     },
 }
 

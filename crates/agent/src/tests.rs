@@ -125,7 +125,7 @@ impl Tool for TestTool {
         self.replay
     }
 
-    fn execute(&self, _: Value) -> ToolFuture<'_> {
+    fn execute(&self, _: Call) -> ToolFuture<'_> {
         Box::pin(async move {
             self.runs.fetch_add(1, Ordering::SeqCst);
             if self.hang {
@@ -168,7 +168,7 @@ fn start_with(
     );
     let engine = Engine::open(store.clone(), registry, EngineSettings::default()).unwrap();
     engine.resume();
-    Agent::new(engine, NewThreads::default())
+    Agent::new(engine, ThreadSetup::default())
 }
 
 async fn settled(agent: &Agent, id: &str) -> Settled {
@@ -574,7 +574,7 @@ async fn live_tool_loop() {
             thread.register(spec)
         })
         .unwrap();
-    let agent = Agent::new(engine, NewThreads::default());
+    let agent = Agent::new(engine, ThreadSetup::default());
 
     let id = agent
         .submit("t1", input("What's the weather in Paris?"))
@@ -809,7 +809,7 @@ async fn a_request_id_routed_twice_submits_once() {
         .commit(|tx| {
             admit(
                 tx,
-                &NewThreads::default(),
+                &ThreadSetup::default(),
                 Place::Routed(route),
                 Draft::of(&input)?,
             )
@@ -881,7 +881,7 @@ async fn live_remembers_across_threads() {
     );
     let engine = Engine::open(store(), registry, EngineSettings::default()).unwrap();
     engine.resume();
-    let agent = Agent::new(engine, NewThreads::default());
+    let agent = Agent::new(engine, ThreadSetup::default());
     let wait = |id: String| {
         let agent = agent.clone();
         async move {
@@ -1089,7 +1089,7 @@ async fn a_run_that_ends_abnormally_leaves_the_thread_valid() {
         .register(Idle::new(None, fast()));
     let engine = Engine::open(store, registry, EngineSettings::default()).unwrap();
     engine.resume();
-    let agent = Agent::new(engine, NewThreads::default());
+    let agent = Agent::new(engine, ThreadSetup::default());
     assert!(matches!(
         settled(&agent, &id).await,
         Settled::Unanswered { .. }
@@ -1168,7 +1168,7 @@ async fn new_threads_start_with_the_system_prompt_and_tools() {
     );
     let engine = Engine::open(store.clone(), registry, EngineSettings::default()).unwrap();
     engine.resume();
-    let new_threads = NewThreads {
+    let new_threads = ThreadSetup {
         system: Some("Be brief.".into()),
         tools: specs,
     };
@@ -1192,6 +1192,34 @@ async fn new_threads_start_with_the_system_prompt_and_tools() {
         })
         .unwrap();
     assert_eq!(registered, 1);
+}
+
+#[tokio::test]
+async fn a_thread_under_way_picks_up_a_prompt_and_tool_added_since() {
+    let script = Script::new(vec![Reply::Text("hi"), Reply::Text("again")]);
+    let mut tools = Tools::new();
+    tools.add(TestTool::new("weather", "18C"));
+    let specs = tools.specs();
+    let agent = start(&store(), &script, tools);
+    let id = agent.submit("t1", input("Hello")).unwrap();
+    settled(&agent, &id).await;
+
+    // As if the program came back with a new prompt and a new tool.
+    let agent = Agent::new(
+        agent.engine().clone(),
+        ThreadSetup {
+            system: Some("Be brief.".into()),
+            tools: specs,
+        },
+    );
+    let id = agent.submit("t1", input("Hello again")).unwrap();
+    settled(&agent, &id).await;
+
+    let seen = script.seen();
+    assert_eq!(seen[0].system, None);
+    assert!(seen[0].tools.is_empty());
+    assert_eq!(seen[1].system.as_deref(), Some("Be brief."));
+    assert_eq!(seen[1].tools.len(), 1);
 }
 
 #[tokio::test]

@@ -13,6 +13,7 @@ experience.workspace = true
 inference.workspace = true
 interface.workspace = true
 memory.workspace = true
+notes.workspace = true
 router.workspace = true
 serde_json.workspace = true
 state.workspace = true

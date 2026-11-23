@@ -59,9 +59,10 @@ fn ours(target: &str) -> bool {
 }
 
 /// The files in a data directory: the state database (the journal sits beside it,
-/// `Journal::beside`) and the memory database.
+/// `Journal::beside`), the memory database and the notes database.
 pub const STATE_FILE: &str = "tokidoki.db";
 pub const MEMORY_FILE: &str = "memory.db";
+pub const NOTES_FILE: &str = "notes.db";
 
 /// The data directory: `TOKIDOKI_DATA`, or `data`.
 pub fn data_dir() -> PathBuf {

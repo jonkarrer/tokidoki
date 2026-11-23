@@ -17,6 +17,7 @@ context = { path = "crates/context" }
 state = { path = "crates/state" }
 inference = { path = "crates/inference" }
 memory = { path = "crates/memory" }
+notes = { path = "crates/notes" }
 attention = { path = "crates/attention" }
 engine = { path = "crates/engine" }
 experience = { path = "crates/experience" }

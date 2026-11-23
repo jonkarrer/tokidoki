@@ -82,7 +82,23 @@ created_at: number,
 /**
  * The last message, ms since the epoch.
  */
-active_at: number, };
+active_at: number, 
+/**
+ * How warm it is, which is how readily a new input goes to it.
+ */
+phase: ThreadPhase, 
+/**
+ * Where it left off, written when it last settled.
+ */
+resume?: string | null, };
+
+/**
+ * A thread is hot while the user talks in it, cool once idle long enough to dream (a new
+ * input then goes to it only when it plainly belongs there), and settled after a long idle,
+ * when its context is reset to a short note of where it left off. Talking in it again makes
+ * it hot.
+ */
+export type ThreadPhase = "hot" | "cool" | "settled";
 
 export type Role = "user" | "assistant";
 
@@ -97,7 +113,7 @@ export type Event = { "type": "checkpoint", thread: string, seq: number,
 /**
  * Ms since the epoch.
  */
-at: number, turn: number, change: Change, } | { "type": "submission", submission: Submission, } | { "type": "activity", thread: string, doing: Doing, } | { "type": "delta", thread: string, delta: Delta, } | { "type": "memory", change: MemoryChange, } | { "type": "lagged" };
+at: number, turn: number, change: Change, } | { "type": "submission", submission: Submission, } | { "type": "activity", thread: string, doing: Doing, } | { "type": "delta", thread: string, delta: Delta, } | { "type": "memory", change: MemoryChange, } | { "type": "note", change: NoteChange, } | { "type": "lagged" };
 
 /**
  * Something tokidoki remembers, across every thread.
@@ -132,6 +148,35 @@ export type MemoryKind = "fact" | "procedure";
 export type MemorySource = { thread: string, seq: number, };
 
 export type MemoryChange = { "kind": "learned", memory: Memory, } | { "kind": "revised", memory: Memory, replaces: number, was: string, } | { "kind": "forgotten", ids: Array<number>, } | { "kind": "described", thread: string, about: string, };
+
+/**
+ * One of the user's notes: kept as written, apart from memory.
+ */
+export type Note = { id: number, title: string, 
+/**
+ * Markdown.
+ */
+body: string, tags: Array<string>, project?: string | null, people: Array<string>, 
+/**
+ * The thread it was saved from, when the model saved it there.
+ */
+thread?: string | null, 
+/**
+ * Ms since the epoch.
+ */
+created_at: number, updated_at: number, };
+
+/**
+ * A note as the user writes it. An empty title takes the body's first line.
+ */
+export type NoteDraft = { title: string, body: string, tags: Array<string>, project: string | null, people: Array<string>, };
+
+/**
+ * Which notes to list. An empty query lists the most recently changed first.
+ */
+export type NoteSearch = { query: string, tag: string | null, project: string | null, };
+
+export type NoteChange = { "kind": "saved", note: Note, } | { "kind": "deleted", id: number, };
 
 /**
  * What a reply grew by.

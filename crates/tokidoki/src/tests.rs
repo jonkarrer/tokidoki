@@ -79,7 +79,7 @@ impl agent::Tool for Weather {
         }
     }
 
-    fn execute(&self, _: Value) -> ToolFuture<'_> {
+    fn execute(&self, _: agent::Call) -> ToolFuture<'_> {
         Box::pin(async { Ok("18C".to_string()) })
     }
 }
@@ -109,6 +109,7 @@ fn parts(replies: Vec<Reply>, store: Sqlite) -> (Parts<Script>, Arc<Script>) {
         router,
         memory,
         scope: Scope::user("owner"),
+        notes: Arc::new(notes::Notes::in_memory().unwrap()),
         tools,
         system: Some("Be brief.".into()),
         settings: agent::Settings {
@@ -228,11 +229,13 @@ async fn an_input_is_routed_answered_and_followed() {
         2,
         "one per model request"
     );
-    // The model saw the thread's setup.
-    assert_eq!(
-        script.seen.lock().unwrap()[0].system.as_deref(),
-        Some("Be brief.")
-    );
+    // The model saw the thread's setup: the prompt, with what it says of notes, and the
+    // tools, with the note tools.
+    let first = &script.seen.lock().unwrap()[0];
+    let system = first.system.as_deref().unwrap();
+    assert!(system.starts_with("Be brief.\n\nNotes are the user's own"));
+    let tools: Vec<&str> = first.tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(tools, ["get_note", "save_note", "search_notes", "weather"]);
 
     let threads = tokidoki.threads().unwrap();
     assert_eq!(threads.len(), 1);
@@ -475,4 +478,148 @@ async fn asleep_it_can_be_read_and_takes_no_input() {
     assert_eq!(refused.downcast::<Rejected>().unwrap().0, "no key");
     assert_eq!(asleep.threads().unwrap()[0].turns, threads[0].turns);
     asleep.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_note_the_user_asks_for_is_saved_from_its_thread_and_shown() {
+    let save = json!({
+        "title": "Groceries",
+        "body": "- oat milk\n- lentils",
+        "tags": "shopping, weekly"
+    });
+    let (tokidoki, _) = start(vec![Reply::Call("save_note", save), Reply::Text("Saved.")]);
+    let owner = Speaker::owner();
+    let mut events = tokidoki.events();
+    let sent = tokidoki
+        .send(me("Save these notes: oat milk, lentils"))
+        .await
+        .unwrap();
+    let submission = settled(&tokidoki, &sent.submission).await;
+    assert_eq!(submission.answer.as_deref(), Some("Saved."));
+
+    let seen = until(&mut events, |e| matches!(e, Event::Note { .. })).await;
+    let Some(Event::Note {
+        change: interface::NoteChange::Saved { note },
+    }) = seen.last()
+    else {
+        panic!("no note event in {seen:?}");
+    };
+    assert_eq!(note.title, "Groceries");
+    assert_eq!(note.tags, ["shopping", "weekly"]);
+    assert_eq!(note.thread.as_deref(), Some(sent.thread.as_str()));
+    let all = tokidoki.notes(&owner, Default::default()).unwrap();
+    assert_eq!(all, std::slice::from_ref(note));
+}
+
+#[tokio::test]
+async fn notes_are_written_changed_and_deleted_by_their_owner() {
+    let (tokidoki, _) = start(Vec::new());
+    let owner = Speaker::owner();
+    let stranger = Speaker::new("stranger");
+    let draft = |title: &str, body: &str| interface::NoteDraft {
+        title: title.into(),
+        body: body.into(),
+        ..Default::default()
+    };
+
+    let note = tokidoki
+        .write_note(&owner, None, draft("", "Call the plumber\nabout the sink"))
+        .unwrap();
+    assert_eq!(note.title, "Call the plumber");
+    assert_eq!(note.thread, None);
+    let changed = tokidoki
+        .write_note(&owner, Some(note.id), draft("Plumber", "Tuesday, 9am"))
+        .unwrap();
+    assert_eq!(changed.id, note.id);
+    let search = interface::NoteSearch {
+        query: "tuesday".into(),
+        ..Default::default()
+    };
+    assert_eq!(tokidoki.notes(&owner, search).unwrap(), [changed]);
+
+    let empty = tokidoki
+        .write_note(&owner, None, draft(" ", ""))
+        .unwrap_err();
+    assert!(empty.downcast::<Rejected>().is_ok());
+    assert!(tokidoki.notes(&stranger, Default::default()).is_err());
+    assert!(tokidoki.delete_note(&stranger, note.id).is_err());
+    tokidoki.delete_note(&owner, note.id).unwrap();
+    let again = tokidoki.delete_note(&owner, note.id).unwrap_err();
+    assert!(again.downcast::<Rejected>().is_ok());
+    assert!(
+        tokidoki
+            .notes(&owner, Default::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn the_timeline_is_every_threads_turns_as_one_conversation() {
+    let (tokidoki, _) = start(vec![
+        Reply::Text("one"),
+        Reply::Text("two"),
+        Reply::Text("three"),
+    ]);
+    for (thread, text) in [("a", "first"), ("b", "second"), ("a", "third")] {
+        let input = Input {
+            thread: Some(thread.into()),
+            ..me(text)
+        };
+        let sent = tokidoki.send(input).await.unwrap();
+        settled(&tokidoki, &sent.submission).await;
+    }
+    // What the user said, in order, and in which thread.
+    let said = |events: Vec<Event>| -> Vec<(String, String)> {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Checkpoint {
+                    thread,
+                    change:
+                        Change::Message {
+                            role: interface::Role::User,
+                            content,
+                        },
+                    ..
+                } => match &content[0] {
+                    Content::Text { text } => Some((thread, text.clone())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    let pair = |thread: &str, text: &str| (thread.to_string(), text.to_string());
+    let all = tokidoki.timeline(None, 10).unwrap();
+    assert_eq!(
+        said(all.clone()),
+        [pair("a", "first"), pair("b", "second"), pair("a", "third")]
+    );
+    // Each turn whole: from its start to its answer.
+    assert!(all.iter().any(|e| matches!(
+        e,
+        Event::Checkpoint {
+            change: Change::TurnEnded,
+            ..
+        }
+    )));
+
+    let latest = tokidoki.timeline(None, 2).unwrap();
+    assert_eq!(
+        said(latest.clone()),
+        [pair("b", "second"), pair("a", "third")]
+    );
+    let Some(Event::Checkpoint { at, .. }) = latest.first() else {
+        panic!("no turns");
+    };
+    let earlier = tokidoki.timeline(Some(*at), 2).unwrap();
+    assert_eq!(said(earlier), [pair("a", "first")]);
+
+    let threads = tokidoki.threads().unwrap();
+    assert!(
+        threads
+            .iter()
+            .all(|t| t.phase == interface::ThreadPhase::Hot)
+    );
 }

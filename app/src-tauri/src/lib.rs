@@ -19,7 +19,10 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
-use tokidoki::interface::{Event, Feedback, Input, Memory, Sent, Speaker, ThreadSummary, WhenBusy};
+use tokidoki::interface::{
+    Event, Feedback, Input, Memory, Note, NoteDraft, NoteSearch, Sent, Speaker, ThreadSummary,
+    WhenBusy,
+};
 use tokidoki::{Config, Tokidoki, Tools, Vendor};
 
 use settings::Settings;
@@ -292,6 +295,12 @@ fn history(app: AppHandle, thread: String, since: usize) -> Said<Vec<Event>> {
     core(&app)?.history(&thread, since).map_err(say)
 }
 
+/// The conversation: every thread's last `turns` turns that started before `before`, as one.
+#[tauri::command]
+fn timeline(app: AppHandle, before: Option<u64>, turns: usize) -> Said<Vec<Event>> {
+    core(&app)?.timeline(before, turns).map_err(say)
+}
+
 #[tauri::command]
 fn abort(app: AppHandle, thread: String) -> Said<bool> {
     core(&app)?.abort(&thread).map_err(say)
@@ -340,6 +349,26 @@ fn wipe_memory(app: AppHandle) -> Said<()> {
     core(&app)?.wipe(&Speaker::owner()).map_err(say)
 }
 
+/// The user's notes that match `search`.
+#[tauri::command]
+fn notes(app: AppHandle, search: NoteSearch) -> Said<Vec<Note>> {
+    core(&app)?.notes(&Speaker::owner(), search).map_err(say)
+}
+
+/// A new note, or (with `id`) a change to one.
+#[tauri::command]
+fn write_note(app: AppHandle, id: Option<i64>, draft: NoteDraft) -> Said<Note> {
+    core(&app)?
+        .write_note(&Speaker::owner(), id, draft)
+        .map_err(say)
+}
+
+/// Deletes the note `id`, for good.
+#[tauri::command]
+fn delete_note(app: AppHandle, id: i64) -> Said<()> {
+    core(&app)?.delete_note(&Speaker::owner(), id).map_err(say)
+}
+
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -377,6 +406,7 @@ pub fn run() {
             send,
             threads,
             history,
+            timeline,
             abort,
             feedback,
             memories,
@@ -384,6 +414,9 @@ pub fn run() {
             revise_memory,
             forget_memory,
             wipe_memory,
+            notes,
+            write_note,
+            delete_note,
             updater::update_status,
             updater::check_for_updates,
             updater::install_update,

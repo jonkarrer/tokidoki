@@ -2612,6 +2612,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "notes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "memory",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4790,6 +4802,7 @@ dependencies = [
  "inference",
  "interface",
  "memory",
+ "notes",
  "router",
  "serde_json",
  "state",

@@ -1,8 +1,10 @@
 // What the window shows, kept in step with the core by its events.
 //
-// A thread on screen is its checkpoints (`log`), in order with no gaps: everything shown is
-// derived from them, so what is on screen is what is stored. The one exception is a reply
-// being written (`live`), which the reply's own checkpoint replaces when it arrives.
+// There is one conversation. Under it the core keeps threads, one per subject, and files
+// each message into one (the router); the conversation is every thread's turns as one, in
+// the order they started (`log`, the core's timeline). Everything shown is derived from those
+// checkpoints, so what is on screen is what is stored. The one exception is a reply being
+// written (`live`), which the reply's own checkpoint replaces when it arrives.
 import {
   core,
   type Checkpoint,
@@ -10,6 +12,8 @@ import {
   type Doing,
   type Memory,
   type MemoryChange,
+  type Note,
+  type NoteChange,
   type Status,
   type Submission,
   type ThreadSummary,
@@ -18,28 +22,39 @@ import {
 /** What Tokidoki is doing on a thread right now. `writing` is a reply arriving. */
 export type Presence = Doing | { kind: "writing" } | null;
 
+/** Turns read at a time, now and each time the user scrolls back for more. */
+const PAGE = 40;
+
 export const app = $state({
   status: null as Status | null,
   /** What the main area shows. */
-  view: "conversation" as "conversation" | "memory" | "keys",
+  view: "conversation" as "conversation" | "memory" | "notes" | "threads" | "keys",
+  /** The threads under the conversation, most recently active first. */
   threads: [] as ThreadSummary[],
+  /** The thread the Threads view shows. */
+  thread: null as string | null,
   /** Everything Tokidoki remembers, newest first. */
   memories: [] as Memory[],
   /** Memories learned or revised since the memory view was last open. */
   unseen: 0,
-  /** The open thread; `null` is a new conversation, which the router places. */
-  current: null as string | null,
+  /** The user's notes, most recently changed first. */
+  notes: [] as Note[],
+  /** The conversation: every thread's checkpoints, turn by turn. */
   log: [] as Checkpoint[],
+  /** Whether there are earlier turns than `log` holds. */
+  earlier: false,
   /** Per thread: what it's doing, and the reply so far. */
   live: {} as Record<string, { doing: Presence; text: string }>,
   /** Inputs waiting for the answer under way. */
   queued: [] as Submission[],
-  /** Per thread: why its last input got no answer. */
-  unanswered: {} as Record<string, string>,
+  /** Why the last input got no answer. */
+  unanswered: null as string | null,
   /** Why the last send didn't go through. */
   sendError: null as string | null,
 });
 
+/** Per thread: the last checkpoint `log` holds, to tell a missed one from the next. */
+let seen: Record<string, number> = {};
 let listening = false;
 
 /** Asks the core where things stand (it opens if it can), and follows it from then on. */
@@ -50,17 +65,26 @@ export async function start() {
   }
   app.status = await core.status();
   // Without a key it is asleep, and what it has can still be read.
-  if (app.status.state !== "failed") await Promise.all([loadThreads(), loadMemories()]);
+  if (app.status.state !== "failed")
+    await Promise.all([loadThreads(), loadMemories(), loadNotes(), loadConversation()]);
   if (app.status.state === "needs_keys") app.view = "keys";
 }
 
-/** Whether there is anything to show yet: conversations or memories from before. */
+/** Whether there is anything to show yet: conversations, memories or notes from before. */
 export function hasHistory() {
-  return app.threads.length > 0 || app.memories.length > 0;
+  return app.threads.length > 0 || app.memories.length > 0 || app.notes.length > 0;
 }
 
 export async function loadMemories() {
   app.memories = await core.memories();
+}
+
+export async function loadNotes() {
+  app.notes = await core.notes({ query: "", tag: null, project: null });
+}
+
+export async function loadThreads() {
+  app.threads = await core.threads();
 }
 
 export function show(view: typeof app.view) {
@@ -68,40 +92,56 @@ export function show(view: typeof app.view) {
   if (view === "memory") app.unseen = 0;
 }
 
-export async function loadThreads() {
-  app.threads = await core.threads();
+/** The thread `id`, under the hood: its own history, in the Threads view. */
+export function showThread(id: string) {
+  app.thread = id;
+  show("threads");
 }
 
-export async function openThread(thread: string | null) {
-  app.view = "conversation";
-  app.current = thread;
-  app.log = [];
-  app.sendError = null;
-  if (!thread) return;
-  const log = await core.history(thread, 0);
-  if (app.current !== thread) return;
+/** The latest turns, as the conversation starts. */
+async function loadConversation() {
+  const log = await core.timeline(null, PAGE);
   app.log = log;
-  // A checkpoint that arrived while that was read may not be in it.
-  await catchUp();
+  app.earlier = turns(log) === PAGE;
+  seen = {};
+  for (const checkpoint of log) seen[checkpoint.thread] = Math.max(seen[checkpoint.thread] ?? -1, checkpoint.seq);
 }
 
-/** Reads the checkpoints the open thread is missing. */
-async function catchUp() {
-  const thread = app.current;
-  if (!thread) return;
-  const more = await core.history(thread, app.log.length);
+/** The turns before the ones shown. */
+export async function loadEarlier() {
+  const first = app.log.find((checkpoint) => checkpoint.change.kind === "turn_started");
+  if (!first) return;
+  const older = await core.timeline(first.at, PAGE);
+  app.earlier = turns(older) === PAGE;
+  app.log = [...older, ...app.log];
+}
+
+function turns(log: Checkpoint[]) {
+  return log.filter((checkpoint) => checkpoint.change.kind === "turn_started").length;
+}
+
+/** Takes a thread's checkpoint if it is the next one; after a gap, reads what was missed. */
+function receive(checkpoint: Checkpoint) {
+  const last = seen[checkpoint.thread];
+  // A thread not shown yet starts here: what it said before is earlier than the conversation.
+  if (last === undefined || checkpoint.seq === last + 1) {
+    app.log.push(checkpoint);
+    seen[checkpoint.thread] = checkpoint.seq;
+  } else if (checkpoint.seq > last + 1) catchUp(checkpoint.thread);
+}
+
+async function catchUp(thread: string) {
+  const more = await core.history(thread, (seen[thread] ?? -1) + 1);
   // Events kept arriving meanwhile: take only what still comes next.
-  if (app.current !== thread) return;
-  for (const checkpoint of more) if (checkpoint.seq === app.log.length) app.log.push(checkpoint);
+  for (const checkpoint of more) if (checkpoint.seq === (seen[thread] ?? -1) + 1) receive(checkpoint);
 }
 
+/** Sends a message; the core files it with the thread it belongs to. */
 export async function send(text: string) {
   app.sendError = null;
   try {
-    const sent = await core.send(text, app.current);
-    delete app.unanswered[sent.thread];
-    if (sent.thread !== app.current) await openThread(sent.thread);
-    await loadThreads();
+    await core.send(text, null);
+    app.unanswered = null;
     return true;
   } catch (error) {
     app.sendError = String(error);
@@ -109,8 +149,9 @@ export async function send(text: string) {
   }
 }
 
+/** Stops whatever is being answered. */
 export function stop() {
-  if (app.current) core.abort(app.current);
+  for (const thread of answering(app.log)) core.abort(thread);
 }
 
 function live(thread: string) {
@@ -126,9 +167,8 @@ function onEvent(event: CoreEvent) {
         app.live[thread] = { doing: null, text: "" };
         loadThreads();
       }
-      if (thread !== app.current) break;
-      if (event.seq === app.log.length) app.log.push(event);
-      else if (event.seq > app.log.length) catchUp();
+      if (change.kind === "turn_started") loadThreads();
+      receive(event);
       break;
     }
     case "activity": {
@@ -151,16 +191,20 @@ function onEvent(event: CoreEvent) {
       if (submission.status === "queued") app.queued.push(submission);
       // Stopping an answer is the user's doing, not a failure to report.
       if (submission.status === "unanswered" && submission.reason !== "aborted")
-        app.unanswered[submission.thread] = submission.reason ?? "";
+        app.unanswered = submission.reason ?? "";
       break;
     }
     case "memory":
       onMemory(event.change);
       break;
+    case "note":
+      onNote(event.change);
+      break;
     case "lagged":
-      catchUp();
+      loadConversation();
       loadThreads();
       loadMemories();
+      loadNotes();
       break;
   }
 }
@@ -186,46 +230,58 @@ function onMemory(change: MemoryChange) {
   }
 }
 
-/** A line of the conversation, as shown. */
-export type Item =
-  | { kind: "user"; key: string; text: string }
-  | { kind: "reply"; key: string; text: string }
-  | { kind: "tool"; key: string; name: string }
-  | { kind: "recalled"; key: string; memories: string[] }
-  | { kind: "learned"; key: string; memory: Memory }
-  | { kind: "compacted"; key: string };
+/** Keeps the list in step with the store: each note once, most recently changed first. */
+function onNote(change: NoteChange) {
+  const others = app.notes.filter((n) => n.id !== (change.kind === "saved" ? change.note.id : change.id));
+  app.notes = change.kind === "saved" ? [change.note, ...others] : others;
+}
 
-/** The conversation a thread's checkpoints make, with what was learned in it (`learned`:
-    memories that came from this thread) where it was learned. */
+/** A line of the conversation, as shown, and the thread it is in. A user's line that starts
+    another thread than the one before it is `moved`: the talk changed subject there. */
+export type Item = { key: string; thread: string } & (
+  | { kind: "user"; text: string; moved: boolean }
+  | { kind: "reply"; text: string }
+  | { kind: "tool"; name: string }
+  | { kind: "recalled"; memories: string[] }
+  | { kind: "learned"; memory: Memory }
+  | { kind: "compacted" }
+);
+
+/** The conversation `log` makes, with what was learned in it (`learned`) where it was learned. */
 export function items(log: Checkpoint[], learned: Memory[]): Item[] {
   const out: Item[] = [];
-  const at = (seq: number) => learned.filter((memory) => memory.source?.seq === seq);
-  for (const { seq: n, change } of log) {
-    const seq = String(n);
+  let last: string | null = null;
+  for (const { thread, seq: n, change } of log) {
+    const key = `${thread}:${n}`;
     if (change.kind === "recalled" && change.memories.length) {
-      out.push({ kind: "recalled", key: seq, memories: change.memories });
+      out.push({ kind: "recalled", key, thread, memories: change.memories });
     } else if (change.kind === "compacted") {
-      out.push({ kind: "compacted", key: seq });
+      out.push({ kind: "compacted", key, thread });
     } else if (change.kind === "message") {
       const text = change.content
         .flatMap((part) => (part.type === "text" ? [part.text] : []))
         .join("\n\n")
         .trim();
-      if (text) out.push({ kind: change.role === "user" ? "user" : "reply", key: seq, text });
+      if (text && change.role === "user") {
+        out.push({ kind: "user", key, thread, text, moved: last !== null && last !== thread });
+        last = thread;
+      } else if (text) out.push({ kind: "reply", key, thread, text });
       for (const part of change.content)
-        if (part.type === "tool_call") out.push({ kind: "tool", key: `${seq}-${part.id}`, name: part.name });
+        if (part.type === "tool_call") out.push({ kind: "tool", key: `${key}-${part.id}`, thread, name: part.name });
     }
-    for (const memory of at(n)) out.push({ kind: "learned", key: `m${memory.id}`, memory });
+    for (const memory of learned)
+      if (memory.source?.thread === thread && memory.source.seq === n)
+        out.push({ kind: "learned", key: `m${memory.id}`, thread, memory });
   }
   return out;
 }
 
-/** Whether an answer is under way on the open thread: its last turn hasn't ended. */
-export function busy(log: Checkpoint[]): boolean {
-  for (let i = log.length - 1; i >= 0; i--) {
-    const kind = log[i].change.kind;
-    if (kind === "turn_ended") return false;
-    if (kind === "turn_started") return true;
+/** The threads answering now: their last turn hasn't ended. */
+export function answering(log: Checkpoint[]): string[] {
+  const open = new Map<string, boolean>();
+  for (const { thread, change } of log) {
+    if (change.kind === "turn_started") open.set(thread, true);
+    if (change.kind === "turn_ended") open.set(thread, false);
   }
-  return false;
+  return [...open].filter(([, busy]) => busy).map(([thread]) => thread);
 }

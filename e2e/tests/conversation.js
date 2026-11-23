@@ -9,12 +9,12 @@ await t.until("a reply to start", () => document.querySelector(".reply")?.textCo
 await t.shot("conversation-2-writing");
 await t.until("the answer to end", () => !document.querySelector(".composer .stop") && document.querySelector(".reply"), 90000);
 await t.check("the reply has words", document.querySelector(".reply").textContent.trim().length > 20);
-await t.until("the thread to be listed", () => document.querySelector("nav li button"), 10000);
+await t.check("what was said shows", document.querySelector(".said")?.textContent.includes("vegetarian"));
 await t.shot("conversation-3-answered");
 // What it learned arrives once the turn has settled.
 let learned = true;
 try {
-  await t.until("a memory", () => /\d+ new/.test(document.querySelector("nav .memory")?.textContent ?? ""), 60000);
+  await t.until("a memory", () => document.querySelector("nav .memory .count.fresh"), 60000);
 } catch {
   learned = false;
 }

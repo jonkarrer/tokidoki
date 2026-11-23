@@ -1,6 +1,6 @@
 <script lang="ts">
   import { core, type Memory } from "./core";
-  import { app, openThread } from "./state.svelte";
+  import { app, showThread } from "./state.svelte";
 
   // What Tokidoki knows: every memory it keeps, newest first. The user can tell it something
   // outright, correct a fact, or have it forget one. The list itself follows the core's
@@ -9,6 +9,7 @@
   let filter = $state("");
   let editing = $state<{ id: number; text: string } | null>(null);
   let forgetting = $state<number | null>(null);
+  let wiping = $state(false);
   let error = $state<string | null>(null);
 
   const shown = $derived.by(() => {
@@ -46,6 +47,11 @@
   async function forget(id: number) {
     forgetting = null;
     await attempt(() => core.forgetMemory(id));
+  }
+
+  async function wipe() {
+    wiping = false;
+    await attempt(() => core.wipeMemory());
   }
 
   function when(ms: number) {
@@ -107,7 +113,7 @@
                       ? "revised"
                       : "learned"}
                     {when(memory.at)}{#if thread}, in
-                      <button class="link" onclick={() => openThread(thread.id)}>{thread.title}</button>{/if}
+                      <button class="link" onclick={() => showThread(thread.id)}>{thread.title}</button>{/if}
                   </span>
                   <div class="actions" class:shown={forgetting === memory.id}>
                     {#if forgetting === memory.id}
@@ -127,6 +133,22 @@
             <li class="empty">No memory matches “{filter}”.</li>
           {/each}
         </ul>
+
+        <!-- Starting over: everything learned goes, for good; the conversations stay. -->
+        <div class="wipe">
+          {#if wiping}
+            <p>
+              Forget all {app.memories.length === 1 ? "1 memory" : `${app.memories.length} memories`} for good? Your
+              conversations stay.
+            </p>
+            <div class="actions shown">
+              <button onclick={() => (wiping = false)}>Keep them</button>
+              <button class="danger" onclick={wipe}>Forget everything</button>
+            </div>
+          {:else}
+            <button class="quiet" onclick={() => (wiping = true)}>Forget everything…</button>
+          {/if}
+        </div>
       {/if}
     </div>
   </div>
@@ -281,9 +303,29 @@
     font-size: 12px;
     font-weight: 600;
   }
-  .actions .danger {
+  .actions button.danger {
     background: var(--danger);
     color: var(--paper);
+  }
+  .wipe {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin-top: 28px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .wipe p {
+    margin: 0;
+  }
+  .quiet {
+    color: var(--muted);
+    font-size: 12.5px;
+  }
+  .quiet:hover {
+    color: var(--danger);
   }
   .edit textarea {
     width: 100%;

@@ -4,7 +4,7 @@ A personal assistant that remembers: an agent with durable execution and automat
 memory, as a Rust workspace, and a macOS app that packages it.
 
 ```bash
-nix develop --impure   # dev shell (from ~/devjon/configs): just, jq, tursodb, turso
+nix develop            # dev shell (nix/devshell.nix): just, jq, tursodb, turso, bun
 just                   # list the recipes
 just chat              # talk to a fresh tokidoki in the terminal
 just app               # run the app with hot reload
