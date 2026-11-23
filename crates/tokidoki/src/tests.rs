@@ -120,6 +120,7 @@ fn parts(replies: Vec<Reply>, store: Sqlite) -> (Parts<Script>, Arc<Script>) {
         journal: None,
         exa: None,
         review: None,
+        voice: None,
     };
     (parts, script)
 }
@@ -687,6 +688,7 @@ async fn research_goes_to_a_worker_and_comes_back() {
         speakers: parts.speakers,
         journal: parts.journal,
         review: parts.review,
+        voice: parts.voice,
     };
     let tokidoki = Tokidoki::build(parts).unwrap();
     let mut events = tokidoki.events();

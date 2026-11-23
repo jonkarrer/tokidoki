@@ -20,6 +20,7 @@ memory = { path = "crates/memory" }
 notes = { path = "crates/notes" }
 jev = { path = "crates/jev" }
 exa = { path = "crates/exa" }
+voice = { path = "crates/voice" }
 attention = { path = "crates/attention" }
 engine = { path = "crates/engine" }
 experience = { path = "crates/experience" }

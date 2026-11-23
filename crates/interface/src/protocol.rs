@@ -297,6 +297,8 @@ pub enum Event {
     Note { change: NoteChange },
     /// A worker started, ended, or had its report delivered or held.
     Worker { worker: Worker },
+    /// The voice models changed: downloading, or ready.
+    Voice { status: VoiceStatus },
     /// Events were missed (the client fell behind): re-read what it shows.
     Lagged,
 }
@@ -429,7 +431,9 @@ pub struct Worker {
     pub parent: String,
     /// What kind of worker: `research`.
     pub kind: String,
-    /// What it was asked to do.
+    /// A few words naming it.
+    pub title: String,
+    /// What it was asked to do, in full: its brief.
     pub task: String,
     pub status: WorkerStatus,
     /// Ms since the epoch.
@@ -460,6 +464,41 @@ pub enum WorkerStatus {
 pub enum Delivery {
     Delivered,
     Held,
+}
+
+/// Where the voice models stand: one to listen (speech to text), one to speak. Both run on
+/// this Mac, downloaded once on first use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct VoiceStatus {
+    pub listening: ModelState,
+    pub speaking: ModelState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ModelState {
+    /// Not downloaded: about this many megabytes to fetch.
+    Missing {
+        megabytes: u32,
+    },
+    /// Downloading or unpacking, this far (0–1).
+    Fetching {
+        done: f32,
+    },
+    Ready,
+}
+
+/// What was said, as text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Heard {
+    pub text: String,
+    /// The language it was said in (`en`, `es`, …).
+    pub language: String,
+    /// Whether tokidoki can speak that language, to answer out loud.
+    pub speakable: bool,
 }
 
 /// What a reply grew by.

@@ -71,6 +71,10 @@ impl Tool for Delegate {
                         "type": "string",
                         "description": "What to find out, standing alone: the worker sees \
                                         nothing of this conversation."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "A few words naming it, for the user's Research list."
                     }
                 },
                 "required": ["task"]
@@ -89,7 +93,16 @@ impl Tool for Delegate {
             if task.trim().is_empty() {
                 bail!("delegate needs a task");
             }
-            let worker = agent(&self.0)?.delegate(&call.thread, &call.id, RESEARCH, &task)?;
+            let title = Some(text(&call.arguments, "title"))
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| first_sentence(&task));
+            let worker = (agent(&self.0)?).delegate(
+                &call.thread,
+                &call.id,
+                RESEARCH,
+                title.trim(),
+                &task,
+            )?;
             Ok(format!(
                 "Started {} on it. Its report comes back on its own: tell the user you're on it.",
                 worker.id
@@ -260,6 +273,23 @@ impl Tool for ReadPage {
     }
 }
 
+/// A title for a brief that came without one: its first sentence, cut short.
+fn first_sentence(task: &str) -> String {
+    let sentence = task
+        .trim()
+        .split_inclusive(['.', '?', '!', '\n'])
+        .next()
+        .unwrap_or(task);
+    let sentence = sentence.trim().trim_end_matches('.');
+    match sentence.char_indices().nth(TITLE_CHARS) {
+        Some((cut, _)) => format!("{}…", sentence[..cut].trim_end()),
+        None => sentence.to_string(),
+    }
+}
+
+/// How long a title taken from a brief may be.
+const TITLE_CHARS: usize = 80;
+
 /// A string argument, or empty.
 fn text(args: &Value, key: &str) -> String {
     args.get(key)
@@ -316,6 +346,7 @@ pub(crate) fn shown(worker: Worker) -> interface::Worker {
         id: worker.id,
         parent: worker.parent,
         kind: worker.kind,
+        title: worker.title,
         task: worker.task,
         status: match worker.status {
             agent::WorkerStatus::Running => S::Running,

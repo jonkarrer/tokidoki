@@ -20,8 +20,8 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tokidoki::interface::{
-    Event, Feedback, Input, Memory, Note, NoteDraft, NoteSearch, Sent, Speaker, ThreadSummary,
-    WhenBusy, Worker,
+    Event, Feedback, Heard, Input, Memory, Note, NoteDraft, NoteSearch, Sent, Speaker,
+    ThreadSummary, VoiceStatus, WhenBusy, Worker,
 };
 use tokidoki::{Config, Tokidoki, Tools, Vendor};
 
@@ -82,6 +82,15 @@ fn data_dir(app: &AppHandle) -> anyhow::Result<PathBuf> {
     })
 }
 
+/// Where the voice models are kept: one folder for the installed app and `just app` alike,
+/// since they are ~900 MB. `TOKIDOKI_VOICE_MODELS` puts them elsewhere.
+fn models_dir(app: &AppHandle) -> anyhow::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("TOKIDOKI_VOICE_MODELS").filter(|dir| !dir.is_empty()) {
+        return Ok(dir.into());
+    }
+    Ok(app.path().app_data_dir()?.join("models"))
+}
+
 /// What each provider is called, and where its keys are made.
 fn named(provider: Vendor) -> (&'static str, &'static str) {
     match provider {
@@ -111,6 +120,8 @@ fn open(app: &AppHandle) -> anyhow::Result<bool> {
     config.jev_key = keys::jev()?;
     // With an Exa key, research can be handed to workers that search the web.
     config.exa_key = keys::exa()?;
+    // The voice models, shared by the installed app and development (they are big).
+    config.voice_models = Some(models_dir(app)?);
     // Development: `TOKIDOKI_MODELS=cheap`, or a model by name.
     let config = config.with_models_from_env();
     let tokidoki = match key {
@@ -415,6 +426,46 @@ fn delete_note(app: AppHandle, id: i64) -> Said<()> {
     core(&app)?.delete_note(&Speaker::owner(), id).map_err(say)
 }
 
+/// Where the voice models stand; `null` when there is no voice.
+#[tauri::command]
+fn voice_status(app: AppHandle) -> Said<Option<VoiceStatus>> {
+    Ok(core(&app)?.voice())
+}
+
+/// Downloads the voice models (once); progress comes as `voice` events.
+#[tauri::command]
+async fn prepare_voice(app: AppHandle) -> Said<()> {
+    let core = core(&app)?;
+    core.prepare_voice(&Speaker::owner()).await.map_err(say)
+}
+
+/// Loads the voice models, if they aren't yet, while the user talks.
+#[tauri::command]
+fn warm_voice(app: AppHandle) -> Said<()> {
+    core(&app)?.warm_voice();
+    Ok(())
+}
+
+/// What was said: the request's body is a WAV recording.
+#[tauri::command]
+async fn listen(app: AppHandle, request: tauri::ipc::Request<'_>) -> Said<Heard> {
+    let tauri::ipc::InvokeBody::Raw(wav) = request.body() else {
+        return Err("send the recording as bytes".into());
+    };
+    let core = core(&app)?;
+    core.listen(&Speaker::owner(), wav.clone())
+        .await
+        .map_err(say)
+}
+
+/// A reply read out in `language`, as WAV bytes.
+#[tauri::command]
+async fn speak(app: AppHandle, text: String, language: String) -> Said<tauri::ipc::Response> {
+    let core = core(&app)?;
+    let wav = (core.speak(&Speaker::owner(), &text, &language).await).map_err(say)?;
+    Ok(tauri::ipc::Response::new(wav))
+}
+
 /// Every worker there has been, latest first.
 #[tauri::command]
 fn workers(app: AppHandle) -> Said<Vec<Worker>> {
@@ -480,6 +531,11 @@ pub fn run() {
             delete_note,
             workers,
             cancel_worker,
+            voice_status,
+            prepare_voice,
+            warm_voice,
+            listen,
+            speak,
             updater::update_status,
             updater::check_for_updates,
             updater::install_update,

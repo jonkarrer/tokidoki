@@ -426,14 +426,21 @@ impl Agent {
         self
     }
 
-    /// Starts a worker of `kind` on `task`, for the tool call `call` in `thread` (`workers`).
-    /// The same call again finds the worker it started.
-    pub fn delegate(&self, thread: &str, call: &str, kind: &str, task: &str) -> Result<Worker> {
+    /// Starts a worker of `kind` on `task` (`title` names it for the user), for the tool call
+    /// `call` in `thread` (`workers`). The same call again finds the worker it started.
+    pub fn delegate(
+        &self,
+        thread: &str,
+        call: &str,
+        kind: &str,
+        title: &str,
+        task: &str,
+    ) -> Result<Worker> {
         let Some(setup) = self.workers.get(kind) else {
             return Err(Rejected(format!("there is no {kind} worker")).into());
         };
         self.engine
-            .commit(|tx| workers::delegate(tx, setup, thread, call, kind, task))
+            .commit(|tx| workers::delegate(tx, setup, thread, call, kind, title, task))
     }
 
     /// Every worker there has been, oldest first.

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { render } from "./markdown";
   import { app, show, type Item } from "./state.svelte";
+  import { ready, speak, stopSpeaking, voice } from "./voice.svelte";
 
   // The lines of a conversation: what the user said, what Tokidoki answered, and around them
   // what it remembered and learned. Where the talk moves to another thread there is a quiet
@@ -19,7 +20,17 @@
     </p>
   {:else if line.kind === "reply"}
     <!-- eslint-disable-next-line svelte/no-at-html-tags (sanitized in render) -->
-    <div class="reply selectable">{@html render(line.text)}</div>
+    <div class="answer">
+      <div class="reply selectable">{@html render(line.text)}</div>
+      {#if ready()}
+        <button
+          class="aloud"
+          class:on={voice.playing === line.key}
+          onclick={() => (voice.playing === line.key ? stopSpeaking() : speak(line.key, line.text))}
+          >{voice.playing === line.key ? "Stop reading" : "Read aloud"}</button
+        >
+      {/if}
+    </div>
   {:else if line.kind === "recalled"}
     <ul class="recalled">
       {#each line.memories as memory}<li class="selectable">{memory}</li>{/each}
@@ -34,13 +45,14 @@
   {:else if line.kind === "compacted"}
     <p class="aside rule">Earlier messages are summarized from here</p>
   {:else if line.kind === "report"}
-    {@const held = app.workers.find((w) => w.id === line.report.worker)?.delivery === "held"}
+    {@const worker = app.workers.find((w) => w.id === line.report.worker)}
+    {@const held = worker?.delivery === "held"}
     <details class="report" class:failed={line.report.status !== "done"}>
       <summary>
         <span class="what"
           >{line.report.status === "done" ? "Research came back" : "Research couldn't be done"}{#if held}{" · kept for when you come back to it"}{/if}</span
         >
-        <span class="task">{line.report.task}</span>
+        <span class="task">{worker?.title || line.report.task}</span>
       </summary>
       <!-- eslint-disable-next-line svelte/no-at-html-tags (sanitized in render) -->
       <div class="reply selectable">{@html render(line.report.body)}</div>
@@ -49,6 +61,22 @@
 {/each}
 
 <style>
+  /* Read aloud: under a reply, shown when the pointer is over it, or while it plays. */
+  .aloud {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    opacity: 0;
+  }
+  .answer:hover .aloud,
+  .aloud:focus-visible,
+  .aloud.on {
+    opacity: 1;
+  }
+  .aloud:hover,
+  .aloud.on {
+    color: var(--indigo);
+  }
   /* The talk changed subject: room, nothing more. */
   .moved {
     margin-top: 64px;

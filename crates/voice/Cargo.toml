@@ -1,0 +1,16 @@
+[package]
+name = "voice"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bzip2 = "0.6"
+hound = "3.5"
+reqwest.workspace = true
+# Static: the speech engine is linked into the binary, with no library to bundle and sign.
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries", "static", "tts"] }
+tar = "0.4"
+tokio.workspace = true
+tracing.workspace = true

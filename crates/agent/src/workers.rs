@@ -49,6 +49,10 @@ pub struct Worker {
     pub parent: String,
     pub turn: u32,
     pub kind: String,
+    /// A few words naming it, for the user's list.
+    #[serde(default)]
+    pub title: String,
+    /// What it was asked, in full: its brief.
     pub task: String,
     pub status: WorkerStatus,
     /// Ms since the epoch.
@@ -102,6 +106,7 @@ pub(crate) fn delegate(
     thread: &str,
     call: &str,
     kind: &str,
+    title: &str,
     task: &str,
 ) -> Result<Worker> {
     if let Some(id) = tx.doc::<String>(&delegated_key(thread, call))? {
@@ -135,6 +140,7 @@ pub(crate) fn delegate(
         parent: thread.to_string(),
         turn,
         kind: kind.to_string(),
+        title: title.to_string(),
         task: task.to_string(),
         status: WorkerStatus::Running,
         started_at: tx.now(),

@@ -16,6 +16,7 @@
 
 mod events;
 mod note_tools;
+mod speech;
 mod worker_tools;
 
 use std::path::PathBuf;
@@ -74,6 +75,9 @@ pub struct Config {
     /// The user's Exa key, for research workers: with one, the model can hand research to a
     /// worker that searches the web (`delegate`).
     pub exa_key: Option<String>,
+    /// Where the voice models are kept, downloaded on first use (`prepare_voice`): with a
+    /// folder, tokidoki can listen and speak (`listen`, `speak`), all on this Mac.
+    pub voice_models: Option<PathBuf>,
     pub agent: agent::Settings,
     /// Record to the journal (`telemetry`), for `just inspect`.
     pub journal: bool,
@@ -99,6 +103,7 @@ impl std::fmt::Debug for Config {
             .field("jev_key", &self.jev_key.as_ref().map(|_| "<set>"))
             .field("jev_model", &self.jev_model)
             .field("exa_key", &self.exa_key.as_ref().map(|_| "<set>"))
+            .field("voice_models", &self.voice_models)
             .finish_non_exhaustive()
     }
 }
@@ -149,6 +154,9 @@ impl Config {
         }
         if let Some(key) = var("EXA_API_KEY") {
             config.exa_key = Some(key);
+        }
+        if let Some(dir) = var("TOKIDOKI_VOICE_MODELS") {
+            config.voice_models = Some(dir.into());
         }
         if let Some(model) = var("TOKIDOKI_JEV_MODEL") {
             config.jev_model = model;
@@ -225,6 +233,7 @@ impl Config {
             jev_key: None,
             jev_model: jev::MODEL.into(),
             exa_key: None,
+            voice_models: None,
             agent: agent::Settings::default(),
             journal: true,
         }
@@ -272,6 +281,8 @@ pub struct Parts<M> {
     /// What decides whether a worker's report is worth interrupting the user for, when they
     /// have moved on from the thread that asked (Jev).
     pub review: Option<Arc<dyn agent::Review>>,
+    /// Listening and speaking, when there is a folder for the models.
+    pub voice: Option<Arc<voice::Voice>>,
 }
 
 /// The running system; cheap to clone.
@@ -287,6 +298,7 @@ struct Inner {
     memory: Arc<Memory>,
     scope: Scope,
     notes: Arc<Notes>,
+    voice: Option<Arc<voice::Voice>>,
     store: Arc<Sqlite>,
     speakers: Vec<String>,
     journal: Option<telemetry::Recording>,
@@ -389,6 +401,7 @@ impl Tokidoki {
             journal,
             exa,
             review,
+            voice: (config.voice_models.clone()).map(|dir| Arc::new(voice::Voice::new(dir))),
         };
         Self::assemble(parts, asleep)
     }
@@ -464,6 +477,7 @@ impl Tokidoki {
                 memory: parts.memory,
                 scope: parts.scope,
                 notes: parts.notes,
+                voice: parts.voice,
                 store: parts.store,
                 speakers: parts.speakers,
                 journal: parts.journal,
@@ -705,6 +719,80 @@ impl Tokidoki {
         let _recorded = self.span().entered();
         self.admit(from)?;
         self.inner.agent.cancel_worker(id)
+    }
+
+    /// Where the voice models stand; `None` when there is no voice (no folder for its models).
+    pub fn voice(&self) -> Option<interface::VoiceStatus> {
+        self.inner.voice.as_deref().map(speech::status)
+    }
+
+    /// Downloads the voice models that are missing (once, ~900 MB), showing progress as
+    /// `Event::Voice`. Returns when both are ready.
+    pub async fn prepare_voice(&self, from: &Speaker) -> Result<()> {
+        self.admit(from)?;
+        let Some(voice) = self.inner.voice.clone() else {
+            return Err(Rejected("there is no voice here".into()).into());
+        };
+        let live = self.inner.live.clone();
+        // Whole percents: a few hundred events, not one per network chunk.
+        let last = std::sync::Mutex::new(None);
+        let progress = |model: voice::Model, done: f32| {
+            let now = Some((model, (done * 100.0) as u32));
+            if std::mem::replace(&mut *last.lock().unwrap(), now) != now {
+                live.show(interface::Event::Voice {
+                    status: speech::status(&voice),
+                });
+            }
+        };
+        let prepared = voice.prepare(progress).await;
+        live.show(interface::Event::Voice {
+            status: speech::status(&voice),
+        });
+        prepared
+    }
+
+    /// What was said in `wav` (any rate, mono or stereo), as text, with its language.
+    pub async fn listen(&self, from: &Speaker, wav: Vec<u8>) -> Result<interface::Heard> {
+        self.admit(from)?;
+        let voice = self.voice_ready()?;
+        speech::listen(voice, wav).instrument(self.span()).await
+    }
+
+    /// `reply` (Markdown) read out in `language`, as WAV. Rejected for a language it can't
+    /// speak (`Heard::speakable`).
+    pub async fn speak(&self, from: &Speaker, reply: &str, language: &str) -> Result<Vec<u8>> {
+        self.admit(from)?;
+        let voice = self.voice_ready()?;
+        if !voice::Voice::speaks(language) {
+            return Err(Rejected(format!("tokidoki can't speak {language} yet")).into());
+        }
+        speech::speak(voice, reply.to_string(), language.to_string()).await
+    }
+
+    /// Loads the voice models if they aren't yet, in the background: call it as the user starts
+    /// talking, so hearing them doesn't wait on it.
+    pub fn warm_voice(&self) {
+        if let Ok(voice) = self.voice_ready() {
+            // A thread of its own: called from anywhere, a runtime or not.
+            std::thread::spawn(move || {
+                if let Err(error) = voice.warm() {
+                    tracing::warn!(error = %format!("{error:#}"), "couldn't load the voice models");
+                }
+            });
+        }
+    }
+
+    fn voice_ready(&self) -> Result<Arc<voice::Voice>> {
+        let Some(voice) = self.inner.voice.clone() else {
+            return Err(Rejected("there is no voice here".into()).into());
+        };
+        let ready = voice::Model::ALL
+            .iter()
+            .all(|model| voice.state(*model) == voice::State::Ready);
+        if !ready {
+            return Err(Rejected("the voice models aren't downloaded yet".into()).into());
+        }
+        Ok(voice)
     }
 
     /// The memory `id`, if it is this user's and still current.

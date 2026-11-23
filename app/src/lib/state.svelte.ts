@@ -29,7 +29,7 @@ const PAGE = 40;
 export const app = $state({
   status: null as Status | null,
   /** What the main area shows. */
-  view: "conversation" as "conversation" | "memory" | "notes" | "threads" | "keys",
+  view: "conversation" as "conversation" | "memory" | "notes" | "research" | "threads" | "keys",
   /** The threads under the conversation, most recently active first. */
   threads: [] as ThreadSummary[],
   /** The thread the Threads view shows. */
@@ -59,6 +59,12 @@ export const app = $state({
 /** Per thread: the last checkpoint `log` holds, to tell a missed one from the next. */
 let seen: Record<string, number> = {};
 let listening = false;
+
+// Hears each reply as it arrives (its line's key and text): the voice reads them out.
+let replied: ((key: string, text: string) => void) | null = null;
+export function whenReplied(hear: (key: string, text: string) => void) {
+  replied = hear;
+}
 
 /** Asks the core where things stand (it opens if it can), and follows it from then on. */
 export async function start() {
@@ -179,7 +185,11 @@ function onEvent(event: CoreEvent) {
   switch (event.type) {
     case "checkpoint": {
       const { thread, change } = event;
-      if (change.kind === "message" && change.role === "assistant") live(thread).text = "";
+      if (change.kind === "message" && change.role === "assistant") {
+        live(thread).text = "";
+        const text = change.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n\n").trim();
+        if (text && !thread.startsWith("worker-")) replied?.(`${thread}:${event.seq}`, text);
+      }
       if (change.kind === "turn_ended") {
         app.live[thread] = { doing: null, text: "" };
         loadThreads();

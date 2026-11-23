@@ -13,6 +13,8 @@ import type {
   Sent,
   Submission,
   ThreadSummary,
+  VoiceStatus,
+  Heard,
   Worker,
 } from "../../../crates/interface/protocol";
 
@@ -31,6 +33,8 @@ export type {
   Submission,
   ThreadPhase,
   ThreadSummary,
+  VoiceStatus,
+  Heard,
   Worker,
 } from "../../../crates/interface/protocol";
 
@@ -81,6 +85,16 @@ export const core = {
   /** Every worker there has been, latest first. */
   workers: () => invoke<Worker[]>("workers"),
   cancelWorker: (id: string) => invoke<boolean>("cancel_worker", { id }),
+  /** Where the voice models stand; `null` when there is no voice. */
+  voiceStatus: () => invoke<VoiceStatus | null>("voice_status"),
+  /** Downloads the voice models; progress comes as `voice` events. */
+  prepareVoice: () => invoke<void>("prepare_voice"),
+  /** Loads the voice models while the user talks, so hearing them doesn't wait. */
+  warmVoice: () => invoke<void>("warm_voice"),
+  /** What a WAV recording says. */
+  listen: (wav: Uint8Array) => invoke<Heard>("listen", wav),
+  /** A reply read out in `language`, as WAV bytes. */
+  speak: (text: string, language: string) => invoke<ArrayBuffer>("speak", { text, language }),
   onEvent: (handler: (event: CoreEvent) => void) => listen<CoreEvent>("tokidoki:event", (e) => handler(e.payload)),
 
   version: () => invoke<string>("app_version"),

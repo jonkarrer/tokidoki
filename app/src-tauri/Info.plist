@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the bundle's Info.plist by the Tauri bundler. macOS shows this text the first
+     time Tokidoki asks for the microphone (push-to-talk). -->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Tokidoki listens only while you hold a conversation by voice, and turns what you say into text on this Mac.</string>
+</dict>
+</plist>

@@ -17,3 +17,14 @@ await t.click(".report summary");
 await t.sleep(200);
 await t.check("the report cites its sources as links", document.querySelectorAll(".report a[href^='http']").length >= 1);
 await t.shot("research-3-report");
+// Research keeps it: listed under Notes in the sidebar, and readable whole.
+await t.click("nav .research");
+await t.see("section li button");
+await t.check("Research lists it", document.querySelectorAll("section li button").length === 1 && /Lisbon/i.test(t.text()));
+await t.check("it says it came back", document.querySelector("section li .meta").textContent.startsWith("Came back"));
+await t.shot("research-4-list");
+await t.click("section li button");
+await t.see("article .reply");
+await t.check("the report is there, with its sources as links", document.querySelectorAll("article .reply a[href^='http']").length >= 1);
+await t.check("it says where it was asked", document.querySelector("article .link"));
+await t.shot("research-5-report");

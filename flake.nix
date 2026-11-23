@@ -45,6 +45,8 @@
           extraShellHook = ''
             export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
             export CC=/usr/bin/clang CXX=/usr/bin/clang++
+            # Rust comes from rustup, not Nix: its tools first.
+            export PATH="$HOME/.cargo/bin:$PATH"
           '';
         };
       });

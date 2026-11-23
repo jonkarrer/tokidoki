@@ -14,6 +14,7 @@ inference.workspace = true
 interface.workspace = true
 jev.workspace = true
 exa.workspace = true
+voice.workspace = true
 memory.workspace = true
 notes.workspace = true
 router.workspace = true

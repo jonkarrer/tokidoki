@@ -113,7 +113,7 @@ export type Event = { "type": "checkpoint", thread: string, seq: number,
 /**
  * Ms since the epoch.
  */
-at: number, turn: number, change: Change, } | { "type": "submission", submission: Submission, } | { "type": "activity", thread: string, doing: Doing, } | { "type": "delta", thread: string, delta: Delta, } | { "type": "memory", change: MemoryChange, } | { "type": "note", change: NoteChange, } | { "type": "worker", worker: Worker, } | { "type": "lagged" };
+at: number, turn: number, change: Change, } | { "type": "submission", submission: Submission, } | { "type": "activity", thread: string, doing: Doing, } | { "type": "delta", thread: string, delta: Delta, } | { "type": "memory", change: MemoryChange, } | { "type": "note", change: NoteChange, } | { "type": "worker", worker: Worker, } | { "type": "voice", status: VoiceStatus, } | { "type": "lagged" };
 
 /**
  * Something tokidoki remembers, across every thread.
@@ -195,7 +195,11 @@ parent: string,
  */
 kind: string, 
 /**
- * What it was asked to do.
+ * A few words naming it.
+ */
+title: string, 
+/**
+ * What it was asked to do, in full: its brief.
  */
 task: string, status: WorkerStatus, 
 /**
@@ -214,6 +218,27 @@ delivery?: Delivery | null, };
 export type WorkerStatus = "running" | "done" | "failed" | "cancelled";
 
 export type Delivery = "delivered" | "held";
+
+/**
+ * Where the voice models stand: one to listen (speech to text), one to speak. Both run on
+ * this Mac, downloaded once on first use.
+ */
+export type VoiceStatus = { listening: ModelState, speaking: ModelState, };
+
+export type ModelState = { "state": "missing", megabytes: number, } | { "state": "fetching", done: number, } | { "state": "ready" };
+
+/**
+ * What was said, as text.
+ */
+export type Heard = { text: string, 
+/**
+ * The language it was said in (`en`, `es`, …).
+ */
+language: string, 
+/**
+ * Whether tokidoki can speak that language, to answer out loud.
+ */
+speakable: boolean, };
 
 /**
  * What a reply grew by.

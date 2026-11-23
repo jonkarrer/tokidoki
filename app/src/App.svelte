@@ -6,16 +6,19 @@
   import Keys from "./lib/Keys.svelte";
   import Memory from "./lib/Memory.svelte";
   import Notes from "./lib/Notes.svelte";
+  import Research from "./lib/Research.svelte";
   import Presence from "./lib/Presence.svelte";
   import Threads from "./lib/Threads.svelte";
   import UpdateCard from "./lib/UpdateCard.svelte";
   import { answering, app, hasHistory, show, start } from "./lib/state.svelte";
+  import { startVoice } from "./lib/voice.svelte";
 
   let version = $state("");
 
   onMount(() => {
     // The page is up once `start` has asked the core where things stand.
     start().then(async () => {
+      await startVoice();
       if (import.meta.env.DEV) (await import("./lib/debug")).startDebug();
     });
     core.version().then((v) => (version = v));
@@ -30,6 +33,10 @@
     document.addEventListener("click", open);
     return () => document.removeEventListener("click", open);
   });
+
+  // Research: whether a worker is looking into something now, and how many reports there are.
+  const looking = $derived(app.workers.some((w) => w.kind === "research" && w.status === "running"));
+  const researched = $derived(app.workers.filter((w) => w.kind === "research" && w.status === "done").length);
 
   // What Tokidoki is doing in the conversation, shown beside it from anywhere in the app.
   const doing = $derived.by(() => {
@@ -72,6 +79,13 @@
         <span>Notes</span>
         <span class="count">{app.notes.length || ""}</span>
       </button>
+      <button class="place research" class:on={app.view === "research"} onclick={() => show("research")}>
+        <span class="mark">
+          {#if looking}<Presence doing={{ kind: "tool", name: "research" }} size={12} />{:else}<span class="lens"></span>{/if}
+        </span>
+        <span>Research</span>
+        <span class="count">{researched || ""}</span>
+      </button>
       <footer>
         <UpdateCard />
         <div class="foot">
@@ -94,6 +108,8 @@
         <Memory />
       {:else if app.view === "notes"}
         <Notes />
+      {:else if app.view === "research"}
+        <Research />
       {:else if app.view === "threads"}
         <Threads />
       {:else}
@@ -190,6 +206,25 @@
     height: 10px;
     border: 1.5px solid var(--indigo);
     border-radius: 1px 4px 1px 1px;
+  }
+  /* Research: a lens, small. */
+  .lens {
+    position: relative;
+    width: 8px;
+    height: 8px;
+    margin: -2px -2px 0 0;
+    border: 1.5px solid var(--indigo);
+    border-radius: 50%;
+  }
+  .lens::after {
+    content: "";
+    position: absolute;
+    right: -4px;
+    bottom: -3px;
+    width: 4px;
+    height: 1.5px;
+    background: var(--indigo);
+    transform: rotate(45deg);
   }
   .count {
     color: var(--muted);

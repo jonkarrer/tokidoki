@@ -4,6 +4,16 @@
   import { render } from "./markdown";
   import Presence from "./Presence.svelte";
   import {
+    cancelTalking,
+    downloaded,
+    prepare,
+    stopSpeaking,
+    toDownload,
+    toggleTalking,
+    typed,
+    voice,
+  } from "./voice.svelte";
+  import {
     answering,
     app,
     cancelWorker,
@@ -98,6 +108,7 @@
     if (!text || sending) return;
     sending = true;
     pinned = true;
+    typed();
     if (await send(text)) draft = "";
     sending = false;
     input?.focus();
@@ -109,7 +120,21 @@
       submit();
     }
   }
+
+  // ⌥Space talks (starts, or stops and sends), wherever the focus is; Esc stops the reading
+  // out, or a recording without sending it.
+  function onwindowkeydown(event: KeyboardEvent) {
+    if (event.altKey && event.code === "Space" && voice.status) {
+      event.preventDefault();
+      toggleTalking();
+    } else if (event.key === "Escape") {
+      if (voice.recording) cancelTalking();
+      else stopSpeaking();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onwindowkeydown} />
 
 <section>
   <header data-tauri-drag-region></header>
@@ -140,7 +165,7 @@
       {#each looking as worker (worker.id)}
         <p class="looking">
           <Presence doing={{ kind: "tool", name: worker.kind }} size={18} />
-          <span>Looking into: {worker.task}</span>
+          <span>Looking into: {worker.title || worker.task}</span>
           <button onclick={() => cancelWorker(worker.id)}>Stop</button>
         </p>
       {/each}
@@ -155,6 +180,21 @@
 
   <form class="composer" onsubmit={(event) => (event.preventDefault(), submit())}>
     {#if app.sendError}<p class="problem selectable" role="alert">{app.sendError}</p>{/if}
+    {#if voice.error}<p class="problem selectable" role="alert">{voice.error}</p>{/if}
+    {#if voice.offering && voice.status}
+      <div class="offer">
+        {#if voice.preparing}
+          <span>Downloading the voice… {Math.round(downloaded() * 100)}%</span>
+          <span class="bar"><span style="width: {downloaded() * 100}%"></span></span>
+        {:else}
+          <span
+            >Talking runs on this Mac: listening and speaking need a one-time download of about {toDownload()} MB.</span
+          >
+          <button type="button" class="quiet" onclick={() => (voice.offering = false)}>Not now</button>
+          <button type="button" class="get" onclick={prepare}>Download</button>
+        {/if}
+      </div>
+    {/if}
     <div class="box">
       <textarea
         bind:this={input}
@@ -164,8 +204,36 @@
         placeholder="Message Tokidoki"
         aria-label="Message"
       ></textarea>
+      {#if voice.recording}
+        <span class="listening" aria-live="polite"
+          ><span class="meter" style="transform: scaleX({0.15 + voice.level * 0.85})"></span>Listening</span
+        >
+      {:else if voice.hearing}
+        <span class="listening">Hearing…</span>
+      {/if}
       {#if working.length}
         <button type="button" class="stop" onclick={stop}>Stop</button>
+      {/if}
+      {#if voice.status}
+        <button
+          type="button"
+          class="mic"
+          class:on={voice.recording}
+          onclick={toggleTalking}
+          disabled={voice.hearing}
+          title={voice.recording ? "Stop and send (⌥Space)" : "Talk (⌥Space)"}
+          aria-label={voice.recording ? "Stop and send" : "Talk"}
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"
+            ><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5" /><path
+              d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            /></svg
+          >
+        </button>
       {/if}
       <button type="submit" class="send" disabled={!draft.trim() || sending}>Send</button>
     </div>
@@ -297,6 +365,76 @@
     padding: 0 13px;
     border-radius: 8px;
     font-weight: 600;
+  }
+  /* Talking: the mic, how loud the microphone is while it listens, and the one-time download. */
+  .box .mic {
+    width: 30px;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    background: var(--side);
+    color: var(--muted);
+  }
+  .box .mic:hover {
+    color: var(--ink);
+  }
+  .box .mic.on {
+    background: var(--danger);
+    color: var(--paper);
+  }
+  .listening {
+    align-self: center;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--muted);
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+  .meter {
+    width: 22px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--danger);
+    transform-origin: left;
+    transition: transform 60ms linear;
+  }
+  .offer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 10px;
+    margin: 0 0 8px;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .offer > span:first-child {
+    flex: 1 1 260px;
+  }
+  .offer button {
+    font-weight: 600;
+    font-size: 12.5px;
+  }
+  .offer .get {
+    padding: 4px 10px;
+    border-radius: 7px;
+    background: var(--indigo);
+    color: var(--paper);
+  }
+  .offer .bar {
+    flex: 1 1 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--side);
+    overflow: hidden;
+  }
+  .offer .bar span {
+    display: block;
+    height: 100%;
+    background: var(--indigo);
   }
   .send {
     background: var(--indigo);
