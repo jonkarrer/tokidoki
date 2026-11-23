@@ -1,35 +1,37 @@
 # Tokidoki
 
-> **Forked 2026-11-23.** Ternt took its own copy of this repo at `4d3b18b` (`tokidoki/` in the
-> ternt repo) and develops it there; this repo is the owner's own project from here on and grows
-> independently. Nothing is synced between the two. The ternt-specific notes below are history.
+A personal-assistant agent in Rust: durable execution (work survives a crash and resumes) and
+automatic long-term memory (it learns from conversations without being told to). The owner's
+goal is "an alive agent that grows with the user". It is one library, `tokidoki::Tokidoki`:
+input in, output out. The next step is a standalone macOS app around it.
 
-A personal-assistant agent in Rust: durable execution and automatic long-term memory. It ships
-as `tokidoki-serve`, the agent sidecar of **ternt** (`~/devjon/projects/ternt`), one agent per
-ternt space. `docs/HANDOFF.md` is the long account of the design; `docs/SIDECAR.md` how the
-sidecar behaves; the contract between the two is ternt's `docs/AGENT-SIDECAR.md`.
+## History worth knowing
+
+- From 2026-11-21 to 2026-11-23 this repo was shaped to run inside **ternt**, the owner's
+  browser app, as a sidecar process with one agent per ternt space. Ternt then took its own
+  copy (at `4d3b18b`, in the ternt repo) and develops it there. Nothing is synced. The
+  ternt-specific parts were removed here afterwards: the sidecar (`tokidoki-serve`), `Spaces`,
+  per-space configuration, the space name told to new threads, and the handoff docs. They are
+  in history at `ed91e80` if ever wanted.
+- A first standalone app (Tauri v2 + Svelte 5, signed and self-updating the way ternt is)
+  existed and was retired when ternt took over. It is in history at `8c807b5`: `app/`,
+  `scripts/publish.sh`, `scripts/release.sh`, `docs/RELEASING.md`. Its interface was never
+  seen running.
 
 ## Standing decisions
 
-- **Scope: a chat with memory, and tools that need no browser** (web search first). No
-  requests from the sidecar back to ternt (tabs, pages, terminals), no key per space, nothing
-  shared between spaces, until the owner says so.
-- **Bring your own key, macOS only.** Keys reach the process only through its environment
-  (`ANTHROPIC_API_KEY`, `FIREWORKS_API_KEY`, `BASETEN_API_KEY`, whichever the host has). Never
-  in a file, never in the repo. The sidecar reads nothing else from the host's environment
-  but `TOKIDOKI_PROVIDER` (the default provider) and `TOKIDOKI_MODEL` / `TOKIDOKI_ROUTER_MODEL`.
-- **Provider and tools are per space** (the owner's decision, 2026-11-23): the host says them
-  with `configure`; keys stay per process. Since 2026-11-23.
-- **Sidecar, not in-process.** A crash in an agent must never end the browser.
-- Both repos are developed by the same agent since 2026-11-21: change ternt and tokidoki
-  together when the contract moves; after `just types` here, `just sync-protocol` in ternt
-  copies the Rust and TypeScript protocol over.
+- **Bring your own key, macOS only.** The user picks one provider (Anthropic, Fireworks or
+  Baseten) and gives its key; that provider answers, does the memory work and routes. Keys
+  never go in a file in the repo.
+- **Without a key it opens asleep** (`Tokidoki::open_asleep`): threads, history and memory can
+  be read and memory edited, unfinished work waits, and only `send` is refused.
+- **Tools come later.** It is a chat with memory for now.
 
 ## Working with the owner
 
 Step by step: one piece, reported, then the next. Expect a review and a simplify pass after a
-chunk of work. Secrets come from Doppler (`doppler run --project ternt --config dev -- …`) or
-the Keychain; never print a key or put one on a command line.
+chunk of work. Commit only when asked. Secrets come from Doppler or the Keychain; never print
+a key or put one on a command line.
 
 ## Tests that call a model
 
@@ -40,18 +42,15 @@ A live test never names a provider's default model.
 ## Style
 
 Every `lib.rs` opens with what the crate is for. Comments are plain prose saying why. Test
-names are sentences (`the_sidecar_ends_when_its_input_does`). `cargo fmt` the files you touch
+names are sentences (`a_reply_is_shown_as_it_is_written`). `cargo fmt` the files you touch
 (edition 2024).
 
 ## Commands
 
 ```sh
-just check                         # fmt, clippy -D warnings, protocol.ts check
-just test                          # all tests; `just test inference --live` hits real APIs
-just types                         # regenerate crates/interface/protocol.ts
-just serve                         # the sidecar here, type requests at it
-cargo build -p tokidoki --bin tokidoki-serve
+just check     # fmt, clippy -D warnings, protocol.ts check
+just test      # all tests; `just test inference --live` hits real APIs
+just types     # regenerate crates/interface/protocol.ts
+just chat      # talk to a fresh agent in the terminal
+just inspect recent   # read what the agent did
 ```
-
-Ternt builds this working tree with `scripts/sidecar.sh tokidoki` and tests the pair with
-`doppler run -- env TERNT_SIDECAR=tokidoki e2e/run.sh tokidoki` (in the ternt repo).

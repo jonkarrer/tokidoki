@@ -650,8 +650,8 @@ mod replay_tests {
 
         let entries = traced.entries(&Filter::default()).unwrap();
         let messages: Vec<&str> = entries.iter().map(|e| e.message.as_str()).collect();
-        // A failed call's request is its own entry, kept out of the warning (which a host
-        // may print) but in the journal.
+        // A failed call's request is its own entry, kept out of the warning (which is
+        // printed) but in the journal.
         assert_eq!(
             messages,
             ["model call", "model call failed", "the request that failed"]

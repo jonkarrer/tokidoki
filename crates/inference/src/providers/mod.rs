@@ -249,8 +249,8 @@ impl<A: Api> Provider<A> {
                 Ok(res)
             }
             Err(error) => {
-                // The error only: the request holds the user's words, and a host
-                // (ternt) keeps this process's stderr in its own log.
+                // The error only: the request holds the user's words, and a warning is
+                // printed on stderr, where a log may keep it.
                 tracing::warn!(
                     provider = self.name,
                     model = %req.model,

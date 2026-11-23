@@ -35,7 +35,3 @@ inspect *args:
 # Talk to a fresh tokidoki in the terminal; its data is deleted on exit unless `--keep`.
 chat *args:
     cargo run -q -p tokidoki --bin chat -- {{args}}
-
-# Run tokidoki as a sidecar process, speaking docs/SIDECAR.md on stdin and stdout.
-serve data="data/spaces":
-    cargo run -q -p tokidoki --bin tokidoki-serve -- --data {{data}}

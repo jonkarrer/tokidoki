@@ -14,10 +14,6 @@
 //! writes. (Several users, each with their own scope, is a later step.)
 
 mod events;
-pub mod serve;
-mod spaces;
-
-pub use spaces::{Setup, Spaces};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,12 +62,11 @@ pub struct Config {
     /// The router's fast model, its last resort.
     pub router_model: String,
     pub agent: agent::Settings,
-    /// Record to the journal (`telemetry`), for `just inspect`. Each open system records to
-    /// the journal in its own `data`, however many run in the process.
+    /// Record to the journal (`telemetry`), for `just inspect`.
     pub journal: bool,
 }
 
-/// Never the key: a `{config:?}` anywhere would otherwise put it in the journal and the host's log.
+/// Never the key: a `{config:?}` anywhere would otherwise put it in the journal.
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
@@ -137,7 +132,6 @@ impl Config {
 
     /// With the models the environment names: `TOKIDOKI_MODELS=cheap` for the provider's
     /// cheapest (tests, always), then `TOKIDOKI_MODEL` and `TOKIDOKI_ROUTER_MODEL` by name.
-    /// The part of `with_env` a host's environment may set.
     pub fn with_models_from_env(mut self) -> Self {
         if var("TOKIDOKI_MODELS").as_deref() == Some("cheap") {
             let (model, router_model) = Self::cheap_models(self.provider);
@@ -240,16 +234,6 @@ pub struct Parts<M> {
     pub journal: Option<telemetry::Recording>,
 }
 
-/// What a tokidoki runs on, for whoever embeds it to show (`Tokidoki::about`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct About {
-    pub provider: Vendor,
-    /// The model that answers.
-    pub model: String,
-    /// The tools its new threads get, by name.
-    pub tools: Vec<String>,
-}
-
 /// The running system; cheap to clone.
 #[derive(Clone)]
 pub struct Tokidoki {
@@ -265,7 +249,6 @@ struct Inner {
     store: Arc<Sqlite>,
     speakers: Vec<String>,
     journal: Option<telemetry::Recording>,
-    about: About,
     /// Why it runs nothing, when it doesn't (`open_asleep`).
     asleep: Option<String>,
 }
@@ -333,11 +316,6 @@ impl Tokidoki {
             provider: provider(),
             request: answers(),
         });
-        let about = About {
-            provider: config.provider,
-            model: config.model.clone(),
-            tools: tools.specs().into_iter().map(|t| t.name).collect(),
-        };
         let parts = Parts {
             store,
             model,
@@ -351,26 +329,20 @@ impl Tokidoki {
             speakers: config.speakers,
             journal,
         };
-        Self::assemble(parts, asleep, about)
+        Self::assemble(parts, asleep)
     }
 
     /// Puts given parts together (another model, a test double), and resumes.
     pub fn build<M: Model>(parts: Parts<M>) -> Result<Self> {
-        let about = About {
-            provider: Vendor::Anthropic,
-            model: "built".into(),
-            tools: parts.tools.specs().into_iter().map(|t| t.name).collect(),
-        };
-        Self::assemble(parts, None, about)
+        Self::assemble(parts, None)
     }
 
-    fn assemble<M: Model>(parts: Parts<M>, asleep: Option<String>, about: About) -> Result<Self> {
+    fn assemble<M: Model>(parts: Parts<M>, asleep: Option<String>) -> Result<Self> {
         // The engine keeps the span it is opened in, for everything it runs.
         let _recorded = span_of(&parts.journal).entered();
         let new_threads = NewThreads {
             system: parts.system,
             tools: parts.tools.specs(),
-            place: Default::default(),
         };
         let live = Live::default();
         // Whatever changes memory (answering, dreaming, the user) is shown as it happens.
@@ -401,20 +373,9 @@ impl Tokidoki {
                 store: parts.store,
                 speakers: parts.speakers,
                 journal: parts.journal,
-                about,
                 asleep,
             }),
         })
-    }
-
-    /// What it runs on.
-    pub fn about(&self) -> &About {
-        &self.inner.about
-    }
-
-    /// Why it takes no input, if it doesn't (`open_asleep`: no key for its provider).
-    pub fn asleep(&self) -> Option<&str> {
-        self.inner.asleep.as_deref()
     }
 
     /// Stops running work (it resumes when the system is opened again), waits until it has
@@ -459,12 +420,6 @@ impl Tokidoki {
 /// What an embedding app calls. Each takes and returns `interface` types, ready to pass on as
 /// JSON; an input it won't take fails with an `interface::Rejected`.
 impl Tokidoki {
-    /// Tell the agent what it is the agent of: the name of the space it lives in, as the host
-    /// calls it. Threads started from now on are told; a rename reaches the next new thread.
-    pub fn set_label(&self, label: &str) {
-        self.inner.agent.set_place(Some(label.to_string()));
-    }
-
     /// Admits an input, to its thread or wherever the router sends it, and returns at once:
     /// follow it with `events` or `wait`.
     pub async fn send(&self, input: Input) -> Result<Sent> {
