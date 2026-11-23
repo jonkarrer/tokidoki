@@ -73,9 +73,6 @@ pub struct Notes {
     watcher: OnceLock<Watcher>,
 }
 
-/// How many matches a search ranks before filtering by tag or project.
-const CANDIDATES: usize = 200;
-
 /// How long a title taken from the body may be.
 const TITLE_CHARS: usize = 60;
 
@@ -230,11 +227,18 @@ impl Notes {
     /// changed first.
     pub fn search(&self, search: &Search) -> Result<Vec<Note>> {
         let conn = self.conn.lock().unwrap();
+        // A tag or project is matched here, after the query: then every row is read, so a
+        // match isn't missed for being old (SQLite reads -1 as no limit).
+        let filtered = search.tag.is_some() || search.project.is_some();
+        let rows = match filtered {
+            true => -1,
+            false => search.limit.max(1) as i64,
+        };
         let found: Vec<Note> = if search.query.trim().is_empty() {
             let mut select = conn
                 .prepare_cached("SELECT * FROM notes ORDER BY updated_at DESC, id DESC LIMIT ?1")?;
             select
-                .query_map([CANDIDATES as i64], note_from)?
+                .query_map([rows], note_from)?
                 .collect::<Result<_, _>>()?
         } else {
             let Some(terms) = memory::fts_query(&search.query) else {
@@ -245,7 +249,7 @@ impl Notes {
                  WHERE notes_fts MATCH ?1 ORDER BY bm25(notes_fts) LIMIT ?2",
             )?;
             select
-                .query_map(params![terms, CANDIDATES as i64], note_from)?
+                .query_map(params![terms, rows], note_from)?
                 .collect::<Result<_, _>>()?
         };
         let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b.trim());
@@ -485,6 +489,38 @@ mod tests {
             .map(|n| n.title)
             .collect();
         assert_eq!(titles, ["First, revised", "Second"]);
+    }
+
+    /// The limit counts what is returned: a tagged note isn't missed for being older than
+    /// that many others.
+    #[test]
+    fn an_old_note_is_still_found_by_its_tag() {
+        let notes = Notes::in_memory().unwrap();
+        let tagged = Draft {
+            tags: vec!["work".into()],
+            ..draft("Old", "plans")
+        };
+        notes.add(tagged, None).unwrap();
+        for title in ["A", "B", "C"] {
+            notes.add(draft(title, "plans"), None).unwrap();
+        }
+        for query in ["", "plans"] {
+            let search = Search {
+                query: query.into(),
+                tag: Some("work".into()),
+                limit: 2,
+                ..Search::default()
+            };
+            let found = notes.search(&search).unwrap();
+            assert_eq!(found.len(), 1, "{query:?}");
+            assert_eq!(found[0].title, "Old");
+            let all = Search {
+                query: query.into(),
+                limit: 2,
+                ..Search::default()
+            };
+            assert_eq!(notes.search(&all).unwrap().len(), 2, "{query:?}");
+        }
     }
 
     #[test]

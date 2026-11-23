@@ -26,6 +26,9 @@ pub const MODEL: &str = "jev-1.14.0";
 /// Requests a busy or rate-limited server is sent again, after a doubling wait.
 const RETRIES: u32 = 2;
 const BACKOFF: Duration = Duration::from_millis(250);
+/// How long one request may take. Jev answers in a few hundred milliseconds; a connection
+/// that stalls is an error, so whoever asked falls back instead of waiting.
+const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A Jev client; cheap to clone.
 #[derive(Clone)]
@@ -49,7 +52,10 @@ impl std::fmt::Debug for Jev {
 impl Jev {
     pub fn new(key: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(TIMEOUT)
+                .build()
+                .expect("an http client"),
             base: BASE_URL.into(),
             key: key.into(),
             model: MODEL.into(),

@@ -570,6 +570,8 @@ async fn the_timeline_is_every_threads_turns_as_one_conversation() {
         };
         let sent = tokidoki.send(input).await.unwrap();
         settled(&tokidoki, &sent.submission).await;
+        // Turns are ordered by the millisecond they started in: no two in the same one.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
     // What the user said, in order, and in which thread.
     let said = |events: Vec<Event>| -> Vec<(String, String)> {

@@ -7,7 +7,7 @@ use inference::providers::Api;
 use memory::Resume;
 use state::{Event, Thread};
 
-use crate::{Experience, card_input};
+use crate::{Experience, card_input, is_report};
 
 const RESUME_INPUT_CHARS: usize = 24_000;
 /// Heads the context of a settled thread.
@@ -45,7 +45,10 @@ impl<A: Api> Experience<A> {
             thread.turn(),
             active_at,
         )?;
-        let len = thread.context().messages.len();
+        // A report held since the last turn isn't in the card: it stays, after it.
+        let messages = &thread.context().messages;
+        let held = messages.iter().rev().take_while(|m| is_report(m)).count();
+        let len = messages.len() - held;
         let handoff = Message::user(format!("{RESUME_HANDOFF}\n{}", resume.text));
         thread.replace(0..len, vec![handoff])?;
         tracing::info!(resume = %resume.text, replaced = len, "settled");

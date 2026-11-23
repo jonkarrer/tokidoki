@@ -117,6 +117,9 @@ async function loadConversation() {
   app.earlier = turns(log) === PAGE;
   seen = {};
   for (const checkpoint of log) seen[checkpoint.thread] = Math.max(seen[checkpoint.thread] ?? -1, checkpoint.seq);
+  // A checkpoint that arrived while that was read went to the log it replaced, and no later
+  // one may come to show the gap: ask each thread for what follows.
+  await Promise.all(Object.keys(seen).map(catchUp));
 }
 
 /** The turns before the ones shown. */
@@ -201,6 +204,8 @@ function onEvent(event: CoreEvent) {
     }
     case "submission": {
       const { submission } = event;
+      // A worker's task isn't the user's input: how it went comes back as its report.
+      if (submission.thread.startsWith("worker-")) break;
       app.queued = app.queued.filter((queued) => queued.id !== submission.id);
       if (submission.status === "queued") app.queued.push(submission);
       // Stopping an answer is the user's doing, not a failure to report.
@@ -276,7 +281,7 @@ export type Report = { worker: string; kind: string; status: string; task: strin
 /** The report a message holds, if it is one. */
 export function report(text: string): Report | null {
   const found = text.match(
-    /^<worker-report worker="([^"]*)" kind="([^"]*)" status="([^"]*)">\nTask: (.*)\n\n([\s\S]*?)\n<\/worker-report>/,
+    /^<worker-report worker="([^"]*)" kind="([^"]*)" status="([^"]*)">\nTask: ([\s\S]*?)\n\n([\s\S]*?)\n<\/worker-report>/,
   );
   if (!found) return null;
   const [, worker, kind, status, task, body] = found;

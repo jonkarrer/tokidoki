@@ -1518,10 +1518,11 @@ async fn a_workers_report_waits_once_the_user_has_moved_on() {
     }
 }
 
-/// A worker stopped before it finishes sends no report.
+/// A worker stopped before it finishes sends no report, and its work can be asked for again
+/// in the same turn.
 #[tokio::test]
 async fn a_cancelled_worker_reports_nothing() {
-    let script = Script::new(vec![Reply::Text("On it."), Reply::Hang]);
+    let script = Script::new(vec![Reply::Text("On it."), Reply::Hang, Reply::Hang]);
     let agent = with_workers(&script, None);
     let id = agent.submit("t1", input("Find X")).unwrap();
     settled(&agent, &id).await;
@@ -1536,4 +1537,8 @@ async fn a_cancelled_worker_reports_nothing() {
     let stopped = worker(&agent, &started.id);
     assert_eq!((stopped.report, stopped.delivery), (None, None));
     assert!(agent.cancel_worker("t1").is_err());
+    let again = agent
+        .delegate("t1", "call-2", "research", "Find Y instead")
+        .unwrap();
+    assert_ne!(again.id, started.id);
 }

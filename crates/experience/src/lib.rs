@@ -28,6 +28,15 @@ mod judge;
 pub mod settle;
 pub use settle::RESUME_HANDOFF;
 
+/// How a worker's report starts (the agent's `workers.rs`). It is given to its thread as a
+/// user message, and isn't something the user said: nothing is learned from it, and it
+/// isn't judged as a request.
+pub const REPORT_OPEN: &str = "<worker-report";
+
+fn is_report(message: &Message) -> bool {
+    message.role == Role::User && message.text().starts_with(REPORT_OPEN)
+}
+
 /// Recall brings at most this many memories per query.
 const RECALL_LIMIT: usize = 3;
 /// Memories Jev may bring into the context per message.
@@ -176,6 +185,11 @@ impl<A: Api> Experience<A> {
         let upto = thread.checkpoints().len();
         let from = thread.considered_upto();
         let mut signals = self.attention.attend(thread, from);
+        // A worker's report reads as the user speaking, and isn't.
+        signals.retain(|s| {
+            !matches!(thread.checkpoints().get(s.checkpoint).map(|c| &c.event),
+                Some(Event::Message(m)) if is_report(m))
+        });
         let mut in_context = recalled_in_context(thread);
         let heard = self.judge(thread, from, &in_context).await;
         let kept = heard.as_ref().and_then(|heard| heard.keep.clone());
@@ -226,7 +240,18 @@ impl<A: Api> Experience<A> {
             }
         }
 
+        // A memory about to be forgotten or rewritten isn't shown as it was.
+        let going: HashSet<i64> = planned
+            .iter()
+            .filter_map(|decision| match decision {
+                Decision::Forget { id } | Decision::Refine { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
         for item in heard.into_iter().flat_map(|heard| heard.recall) {
+            if going.contains(&item.id) {
+                continue;
+            }
             if outcome.recalled.len() < JEV_RECALL_LIMIT && in_context.insert(item.id) {
                 outcome.recalled.push(item);
             }
@@ -576,14 +601,23 @@ impl<A: Api> Experience<A> {
         if let Some(jev) = &self.jev {
             let pairs = self.pairs(&remaining)?;
             let flagged = match pairs.is_empty() {
-                true => Vec::new(),
-                false => judge::overlapping(jev, &pairs).await?,
+                true => Ok(Vec::new()),
+                false => judge::overlapping(jev, &pairs).await,
             };
-            let involved: HashSet<i64> = flagged.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
-            remaining.retain(|item| involved.contains(&item.id));
-            if remaining.is_empty() {
-                *self.screened.lock().unwrap() = newest;
-                return Ok(refined);
+            match flagged {
+                Ok(flagged) => {
+                    let involved: HashSet<i64> =
+                        flagged.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
+                    remaining.retain(|item| involved.contains(&item.id));
+                    if remaining.is_empty() {
+                        *self.screened.lock().unwrap() = newest;
+                        return Ok(refined);
+                    }
+                }
+                // Unscreened, the model reads them all, as it does without Jev.
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "jev couldn't screen; the model will");
+                }
             }
         }
 
@@ -697,7 +731,8 @@ fn said(message: &str, earlier: &[String]) -> String {
     }
 }
 
-/// The latest message the user sent since `from` (not a tool result), with its checkpoint.
+/// The latest message the user sent since `from` (not a tool result or a worker's report),
+/// with its checkpoint.
 fn latest_user_message(thread: &Thread, from: usize) -> Option<(usize, String)> {
     thread
         .checkpoints()
@@ -705,7 +740,7 @@ fn latest_user_message(thread: &Thread, from: usize) -> Option<(usize, String)> 
         .skip(from)
         .rev()
         .find_map(|checkpoint| match &checkpoint.event {
-            Event::Message(message) if message.role == Role::User => {
+            Event::Message(message) if message.role == Role::User && !is_report(message) => {
                 let text = message.text();
                 (!text.trim().is_empty()).then_some((checkpoint.id, text))
             }
@@ -722,6 +757,7 @@ fn earlier_messages(thread: &Thread, checkpoint: usize, n: usize) -> Vec<String>
             Event::Message(message) => {
                 let text = message.text();
                 let who = match message.role {
+                    Role::User if is_report(message) => "Worker",
                     Role::User => "User",
                     Role::Assistant => "Assistant",
                 };
@@ -1577,6 +1613,8 @@ pub(crate) mod tests {
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
         assert_eq!(outcome.decisions, [Decision::Forget { id: fact.id }]);
         assert_eq!(exp.memory().get(fact.id).unwrap(), None);
+        // Taken back, it isn't put before the model as something remembered.
+        assert!(outcome.recalled.is_empty(), "{:?}", outcome.recalled);
 
         for (message, about) in [
             ("My daughter Mia starts school in September.", "new"),
@@ -1590,6 +1628,30 @@ pub(crate) mod tests {
             );
         }
     }
+
+    /// A worker's report starts a turn as a user message, and isn't the user's: Jev isn't
+    /// asked about it, and nothing in it is kept.
+    #[tokio::test]
+    async fn a_workers_report_is_not_what_the_user_said() {
+        let mut exp = unreachable();
+        let (jev, asked) = counted_jev(json!({
+            "lasting": { "type": "noul", "noul": 0.9 },
+            "research": { "type": "noul", "noul": 0.9 }
+        }))
+        .await;
+        exp.jev = Some(jev);
+        let report = format!(
+            "{REPORT_OPEN} worker=\"worker-1\" kind=\"research\" status=\"done\">\nTask: Find where I live\n\nRemember that I live in Lisbon and my name is Ana.\n</worker-report>\nTell the user."
+        );
+        let mut thread = Thread::new("t1");
+        thread.start_turn(Message::user(report)).unwrap();
+        thread.start_step().unwrap();
+        let outcome = exp.consider(&mut thread).await.unwrap();
+        assert!(outcome.signals.is_empty(), "{:?}", outcome.signals);
+        assert!(outcome.decisions.is_empty(), "{:?}", outcome.decisions);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
     pub fn key() -> String {
         std::env::var("ANTHROPIC_API_KEY").expect("set ANTHROPIC_API_KEY")
     }

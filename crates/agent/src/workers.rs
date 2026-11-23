@@ -111,7 +111,9 @@ pub(crate) fn delegate(
     let index: Vec<String> = tx.doc(INDEX)?.unwrap_or_default();
     for id in &index {
         let other = load(tx, id)?;
-        if other.parent == thread && other.turn == turn && other.kind == kind {
+        // A cancelled one has no report coming: the work can be asked for again.
+        let coming = other.status != WorkerStatus::Cancelled;
+        if coming && other.parent == thread && other.turn == turn && other.kind == kind {
             return Err(Rejected(format!(
                 "{id} is already on this turn's {kind}: wait for its report instead"
             ))
@@ -318,8 +320,7 @@ fn user_messages(thread: &state::Thread, n: usize) -> Vec<String> {
     said
 }
 
-/// How a report starts, so it is told apart from what the user said.
-pub const REPORT_OPEN: &str = "<worker-report";
+pub use experience::REPORT_OPEN;
 
 /// A worker's report as the parent thread is given it, with what to do about it.
 fn report_message(worker: &Worker, delivered: bool) -> String {
@@ -342,7 +343,8 @@ fn report_message(worker: &Worker, delivered: bool) -> String {
         "{REPORT_OPEN} worker=\"{}\" kind=\"{}\" status=\"{status}\">\nTask: {}\n\n{}\n</worker-report>\n{note}",
         worker.id,
         worker.kind,
-        worker.task,
+        // On one line, so where the task ends and the report starts is plain.
+        worker.task.split_whitespace().collect::<Vec<_>>().join(" "),
         worker.report.as_deref().unwrap_or("(no report)"),
     )
 }
