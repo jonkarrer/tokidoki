@@ -168,6 +168,13 @@ build() {
     fail "built app isn't version $version"
   # Only system libraries: a Nix toolchain would link /nix/store paths.
   otool -L $app/Contents/MacOS/* | grep -E '^\s+/(nix|opt|usr/local)/' && fail "links non-system libraries (build with Apple's toolchain)"
+  # The update archive must be signed with the key whose public half is built into the app,
+  # or installed copies refuse it. A TAURI_SIGNING_PRIVATE_KEY already in the environment
+  # (another app's, from its Doppler config) wins over ~/.tauri/tokidoki.key, so compare
+  # the key ids: bytes 3 to 10 of a minisign public key and of a signature.
+  key_id() { sed -n 2p | base64 -d | xxd -p -s 2 -l 8; }
+  [[ $(base64 -d < $archive.sig | key_id) == $(grep -o '"pubkey": "[^"]*"' $CONF | cut -d'"' -f4 | base64 -d | key_id) ]] ||
+    fail "the update archive was signed with a key that isn't this app's (is another app's TAURI_SIGNING_PRIVATE_KEY in the environment?)"
   if [[ -z $DRY ]]; then
     /usr/bin/xcrun stapler validate $app
     spctl --assess --type execute -vv $app

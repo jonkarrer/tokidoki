@@ -34,15 +34,21 @@ copy only ever installs what this project published, whoever can read the repo.
 | `APPLE_CLI_UPLOAD_KEY_ID` + `_ISSUER_ID` | App Store Connect API key for notarization (the one ternt uses; the `.p8` is in `~/devjon/ids`) | env: required |
 | a *Developer ID Application* certificate | signs the app | the keychain (ternt's signing keychain is unlocked if present) |
 
-The Apple values are in ternt's Doppler project, so until Tokidoki has its own:
+The Apple values and the GitHub token are in Doppler, project `general`, config
+`app_tokidoki`:
 
 ```sh
-doppler run --project ternt --config dev -- just upload
+doppler run --project general --config app_tokidoki -- just upload
 ```
+
+Don't run it under another app's config: one that holds that app's
+`TAURI_SIGNING_PRIVATE_KEY` signs the update with the wrong key (0.1.1's was signed with
+ternt's this way; `publish.sh` now refuses to go on when the key isn't this app's).
 
 **The updater key** (`~/.tauri/tokidoki.key`, its password beside it) signs every update;
 installed copies only accept updates signed with it, and its public half is in
-`tauri.conf.json`. Back it up somewhere that outlives this Mac (Doppler, as ternt's is).
+`tauri.conf.json`. Back it up somewhere that outlives this Mac (the same Doppler config, as
+`TAURI_SIGNING_PRIVATE_KEY` and `_PASSWORD`).
 **Never commit it**: losing it means installed copies can't update.
 
 **The GitHub token** is a fine-grained token with *Contents: Read and write* on this

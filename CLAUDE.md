@@ -18,9 +18,9 @@ input in, output out, and a macOS app around it (`app/`, Tauri v2 + Svelte 5).
 - Later on 2026-11-23 it grew past a chat with memory: one conversation over many threads,
   Jev for the quick decisions, workers that research the web, the user's notes, and voice
   run on the Mac. `CASE_STUDY.md` tells the whole story and the reasons.
-- The repo is public (MIT) and releases go on it. The release pipeline (`scripts/publish.sh`,
-  `docs/RELEASING.md`) passed a dry run on 2026-11-24; signing, notarizing and uploading
-  have not run yet.
+- The repo is public (MIT) and releases go on it. 0.1.1, the first, was published on
+  2026-11-24: `doppler run --project general --config app_tokidoki -- just upload`
+  (`docs/RELEASING.md`).
 
 ## Standing decisions
 
