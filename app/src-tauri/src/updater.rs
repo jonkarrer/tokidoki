@@ -2,7 +2,8 @@
 //! `latest.json` manifest; every update is signed with the project's updater key and checked
 //! against the public key in `tauri.conf.json` before it is installed.
 //!
-//! Tokidoki checks shortly after launch and every 15 minutes. An update it finds downloads
+//! Tokidoki checks shortly after launch, every 15 minutes, and when its window comes forward
+//! after a couple of minutes away. An update it finds downloads
 //! in the background and installs when Tokidoki quits; meanwhile the app says it's ready,
 //! with Restart Now to use it right away. Unfinished work survives either way: the engine
 //! resumes it at the next launch.
@@ -20,6 +21,9 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 const FIRST_CHECK: Duration = Duration::from_secs(5);
 const CHECK_EVERY: Duration = Duration::from_secs(15 * 60);
+/// Coming back to the window checks again once the last check is this old: whoever returns
+/// to Tokidoki hears of a release without waiting out the 15 minutes.
+const CHECK_ON_FOCUS_AFTER: Duration = Duration::from_secs(2 * 60);
 /// How often the background loop looks at the clock. Timers stop while the Mac sleeps, so it
 /// compares wall-clock times rather than sleeping `CHECK_EVERY`.
 const TICK: Duration = Duration::from_secs(60);
@@ -31,6 +35,8 @@ pub enum Status {
     /// Nothing to show (also while an update downloads in the background).
     #[default]
     Idle,
+    /// A check the user asked for is under way (and the download, if it finds something).
+    Checking,
     /// A check the user asked for found nothing.
     UpToDate,
     /// Downloaded and verified: installs on quit, or now with a restart.
@@ -71,15 +77,44 @@ pub fn start(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK).await;
         loop {
-            let last = *app.state::<Updates>().last_check.lock().unwrap();
-            // A clock set backwards counts as due.
-            let due = last.is_none_or(|at| at.elapsed().unwrap_or(Duration::MAX) >= CHECK_EVERY);
+            let due = since_last_check(&app).is_none_or(|age| age >= CHECK_EVERY);
             if due && let Err(error) = check(&app, false).await {
                 eprintln!("update check failed: {error}");
             }
             tokio::time::sleep(TICK).await;
         }
     });
+}
+
+/// The window came forward: check if it has been a while.
+pub fn on_focus(app: &AppHandle) {
+    // Before the first check, `start` has it covered.
+    if !enabled() || since_last_check(app).is_none_or(|age| age < CHECK_ON_FOCUS_AFTER) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = check(&app, false).await {
+            eprintln!("update check failed: {error}");
+        }
+    });
+}
+
+fn since_last_check(app: &AppHandle) -> Option<Duration> {
+    let last = (*app.state::<Updates>().last_check.lock().unwrap())?;
+    // A clock set backwards counts as due.
+    Some(last.elapsed().unwrap_or(Duration::MAX))
+}
+
+/// The user asked for a check (the menu, the settings, the version in the sidebar): the app
+/// says what it found, whatever that is.
+pub async fn check_now(app: &AppHandle) {
+    if !enabled() {
+        let message = "Development builds don't update themselves.".to_string();
+        set_status(app, Status::Failed { message });
+    } else if let Err(error) = check(app, true).await {
+        eprintln!("update check failed: {error}");
+    }
 }
 
 fn updater(app: &AppHandle) -> tauri_plugin_updater::Result<tauri_plugin_updater::Updater> {
@@ -101,10 +136,13 @@ async fn check(app: &AppHandle, manual: bool) -> Result<(), String> {
         return Ok(());
     }
     *updates.last_check.lock().unwrap() = Some(SystemTime::now());
-    let result = find(app, manual).await;
-    updates.checking.store(false, Ordering::Release);
     // A failed check takes nothing away from an update that is already downloaded.
     let ready = updates.pending.lock().unwrap().is_some();
+    if manual && !ready {
+        set_status(app, Status::Checking);
+    }
+    let result = find(app, manual).await;
+    updates.checking.store(false, Ordering::Release);
     if manual
         && !ready
         && let Err(message) = &result
@@ -162,11 +200,8 @@ pub fn update_status(app: AppHandle) -> Status {
 }
 
 #[tauri::command]
-pub async fn check_for_updates(app: AppHandle) -> Result<(), String> {
-    if !enabled() {
-        return Err("Development builds don't update themselves.".into());
-    }
-    check(&app, true).await
+pub async fn check_for_updates(app: AppHandle) {
+    check_now(&app).await
 }
 
 /// Swap in the downloaded update and relaunch.

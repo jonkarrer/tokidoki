@@ -45,7 +45,7 @@ export type Checkpoint = Extract<Event, { type: "checkpoint" }>;
 export type Status = { state: "needs_keys" } | { state: "ready" } | { state: "failed"; message: string };
 
 export type UpdateStatus =
-  | { state: "idle" | "up_to_date" }
+  | { state: "idle" | "checking" | "up_to_date" }
   | { state: "ready" | "installing"; version: string }
   | { state: "failed"; message: string };
 

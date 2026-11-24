@@ -18,7 +18,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::menu::{Menu, MenuItem, MenuItemKind};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
 use tokidoki::interface::{
     Event, Feedback, Heard, Input, Memory, Note, NoteDraft, NoteSearch, Sent, Speaker,
     ThreadSummary, VoiceStatus, WhenBusy, Worker,
@@ -487,6 +488,20 @@ fn show_window(app: &AppHandle) {
     }
 }
 
+const CHECK_UPDATES: &str = "check-updates";
+
+/// The usual Mac menus (without Edit's items copy and paste don't work in a webview), with
+/// Check for Updates under About, where Mac apps keep it.
+fn menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(tokidoki)) = menu.items()?.first() {
+        let check =
+            MenuItem::with_id(app, CHECK_UPDATES, "Check for Updates…", true, None::<&str>)?;
+        tokidoki.insert(&check, 1)?;
+    }
+    Ok(menu)
+}
+
 pub fn run() {
     // Links (a reply's, a report's sources) open in the browser, not in this window.
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
@@ -501,15 +516,26 @@ pub fn run() {
         .manage(Core::default())
         .manage(updater::Updates::default())
         .setup(|app| {
+            app.set_menu(menu(app.handle())?)?;
             updater::start(app.handle());
             Ok(())
         })
-        // Closing the window leaves Tokidoki running; the Dock icon brings it back.
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_menu_event(|app, event| {
+            if event.id() == CHECK_UPDATES {
+                // What it finds is said in the window, so the window comes forward.
+                show_window(app);
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move { updater::check_now(&app).await });
+            }
+        })
+        .on_window_event(|window, event| match event {
+            // Closing the window leaves Tokidoki running; the Dock icon brings it back.
+            WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            WindowEvent::Focused(true) => updater::on_focus(window.app_handle()),
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             status,

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { core, type Chosen } from "./core";
   import Presence from "./Presence.svelte";
+  import { updates, watchUpdates } from "./updates.svelte";
 
   // Whose models Tokidoki runs on, and the user's own key for them: at first launch
   // (`first`), and later from the sidebar. A key field left empty keeps the key already
@@ -17,7 +18,28 @@
   let saving = $state(false);
   let error = $state<string | null>(null);
 
+  let version = $state("");
+  watchUpdates();
+  const update = $derived(updates.status);
+  const updateText = $derived.by(() => {
+    switch (update.state) {
+      case "checking":
+        return "Checking…";
+      case "ready":
+        return `Tokidoki ${update.version} is downloaded and installs when you quit.`;
+      case "installing":
+        return `Installing ${update.version}. Tokidoki restarts in a moment.`;
+      case "up_to_date":
+        return "Tokidoki is up to date.";
+      case "failed":
+        return `The last check or update failed: ${update.message}`;
+      default:
+        return "Tokidoki checks for updates by itself and installs them when you quit.";
+    }
+  });
+
   onMount(async () => {
+    core.version().then((v) => (version = v));
     chosen = await core.chosen();
     provider = chosen.provider;
     model = chosen.model ?? "";
@@ -130,6 +152,25 @@
       {saving ? "Checking the key…" : first ? "Save and start" : "Save"}
     </button>
   </div>
+
+  {#if !first}
+    <div class="update">
+      <div>
+        <span>Version {version}</span>
+        <small class="selectable">{updateText}</small>
+      </div>
+      {#if update.state === "ready"}
+        <button type="button" class="primary" onclick={() => core.installUpdate()}>Restart to update</button>
+      {:else}
+        <button
+          type="button"
+          class="quiet"
+          disabled={update.state === "checking" || update.state === "installing"}
+          onclick={() => core.checkForUpdates()}>Check for updates</button
+        >
+      {/if}
+    </div>
+  {/if}
 </form>
 
 <style>
@@ -231,7 +272,32 @@
     justify-content: flex-end;
     gap: 8px;
   }
-  .actions button {
+  .update {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 6px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+  }
+  .update div {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .update span {
+    font-weight: 600;
+  }
+  .update button {
+    flex: none;
+  }
+  .update button:disabled {
+    opacity: 0.45;
+  }
+  .actions button,
+  .update button {
     height: 32px;
     padding: 0 14px;
     border-radius: 8px;

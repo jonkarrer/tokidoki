@@ -1,21 +1,16 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { core, type UpdateStatus } from "./core";
+  import { core } from "./core";
+  import { updates, watchUpdates } from "./updates.svelte";
 
   // Shown at the foot of the sidebar once an update has downloaded: it installs when
   // Tokidoki quits, or now with Restart now (src-tauri/src/updater.rs). Also answers
   // Check for updates.
-  let status = $state<UpdateStatus>({ state: "idle" });
   let later = $state<string | null>(null);
 
-  onMount(() => {
-    // Subscribe first, then read, so no change slips in between.
-    const stop = core.onUpdate((next) => (status = next));
-    core.updateStatus().then((now) => (status = now));
-    return () => void stop.then((off) => off());
-  });
-
+  watchUpdates();
+  const status = $derived(updates.status);
   const shown = $derived(status.state !== "idle" && !(status.state === "ready" && later === status.version));
+  const close = () => (updates.status = { state: "idle" });
 </script>
 
 {#if shown}
@@ -30,14 +25,16 @@
     {:else if status.state === "installing"}
       <strong>Restarting…</strong>
       <span>Tokidoki {status.version} opens in a moment.</span>
+    {:else if status.state === "checking"}
+      <strong>Checking for updates…</strong>
     {:else if status.state === "up_to_date"}
       <strong>Tokidoki is up to date</strong>
-      <div class="actions"><button onclick={() => (status = { state: "idle" })}>Close</button></div>
+      <div class="actions"><button onclick={close}>Close</button></div>
     {:else if status.state === "failed"}
       <strong>The update didn't go through</strong>
       <span class="selectable">{status.message}</span>
       <div class="actions">
-        <button onclick={() => (status = { state: "idle" })}>Close</button>
+        <button onclick={close}>Close</button>
         <button class="primary" onclick={() => core.checkForUpdates()}>Check again</button>
       </div>
     {/if}
