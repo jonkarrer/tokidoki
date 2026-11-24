@@ -13,8 +13,9 @@
 # new installs, the signed update archive and latest.json for installed copies
 # (app/src-tauri/src/updater.rs).
 #
-# The source stays in its private repo; $REPO holds releases only, and must let anyone with
-# the link download them (the updater sends no credentials). Uploads use a GitHub token:
+# Releases go on the source repo, $REPO, which must be public: the updater sends no
+# credentials, and a private repo's release files can't be had without them. Uploads use a
+# GitHub token:
 # $GITHUB_ACCESS_TOKEN, $GITHUB_TOKEN, or the keychain item "tokidoki-github".
 set -e
 cd ${0:A:h:h}

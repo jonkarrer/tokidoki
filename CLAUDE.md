@@ -14,17 +14,27 @@ input in, output out, and a macOS app around it (`app/`, Tauri v2 + Svelte 5).
   per-space configuration, the space name told to new threads, and the handoff docs. They are
   in history at `ed91e80` if ever wanted.
 - The app (signed and self-updating the way ternt is) was first built on 2026-11-21, retired
-  when ternt took over, and brought back on 2026-11-23 with a provider picker. Its release
-  pipeline (`scripts/publish.sh`, `docs/RELEASING.md`) has never run end to end.
+  when ternt took over, and brought back on 2026-11-23 with a provider picker.
+- Later on 2026-11-23 it grew past a chat with memory: one conversation over many threads,
+  Jev for the quick decisions, workers that research the web, the user's notes, and voice
+  run on the Mac. `CASE_STUDY.md` tells the whole story and the reasons.
+- The repo is public (MIT) and releases go on it. The release pipeline (`scripts/publish.sh`,
+  `docs/RELEASING.md`) passed a dry run on 2026-11-24; signing, notarizing and uploading
+  have not run yet.
 
 ## Standing decisions
 
 - **Bring your own key, macOS only.** The user picks one provider (Anthropic, Fireworks or
-  Baseten) and gives its key; that provider answers, does the memory work and routes. Keys
-  never go in a file in the repo.
+  Baseten) and gives its key; that provider answers and does the memory work. Two more keys
+  are optional: Jev's (TypeSafe), which makes routing and memory decisions fast and cheap,
+  and Exa's, which lets a worker search the web. Everything works without them. Keys never
+  go in a file in the repo.
 - **Without a key it opens asleep** (`Tokidoki::open_asleep`): threads, history and memory can
   be read and memory edited, unfinished work waits, and only `send` is refused.
-- **Tools come later.** It is a chat with memory for now.
+- **The user sees one conversation.** Threads are how it is filed underneath.
+- **Memory is the agent's, notes are the user's.** Nothing tidies or rewrites a note.
+- **Voice never leaves the Mac.** The models are downloaded on first use.
+- **Nothing in here is secret, and nothing secret goes in here:** the repo is public.
 
 ## Working with the owner
 

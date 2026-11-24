@@ -12,23 +12,18 @@ just upload          # on the signing Mac: build, sign, notarize, push, publish
 
 ## Where releases live
 
-The source repo is private, and a private repo's release files can't be downloaded without
-credentials, which the updater doesn't send. So releases go to a **separate repo that holds
-nothing but releases**, `jonkarrer/tokidoki-dist`, whose files anyone with the link can
-download. It is named once, in the updater endpoint in `app/src-tauri/tauri.conf.json`:
+On the source repo itself, `jonkarrer/tokidoki`, which is public. It has to be: the updater
+sends no credentials, and a private repo's release files can't be downloaded without them.
+The repo is named once, in the updater endpoint in `app/src-tauri/tauri.conf.json`:
 
 ```json
-"endpoints": ["https://github.com/jonkarrer/tokidoki-dist/releases/latest/download/latest.json"]
+"endpoints": ["https://github.com/jonkarrer/tokidoki/releases/latest/download/latest.json"]
 ```
 
 `scripts/publish.sh` reads the repo from that line. The endpoint is built into every copy of
-the app, so changing it later strands the copies already installed. The repo must be public
-(a private repo's release files need credentials) and must have at least one commit before
-GitHub lets a release be created in it.
-
-The app is private in the sense that nobody is told where it is: the repo isn't linked from
-anywhere and holds no source. Every update is signed with the updater key, so a copy only
-ever installs what this project published.
+the app, so changing it later strands the copies already installed (the old address would
+have to keep serving a `latest.json`). Every update is signed with the updater key, so a
+copy only ever installs what this project published, whoever can read the repo.
 
 ## What `just upload` needs
 
@@ -50,7 +45,7 @@ installed copies only accept updates signed with it, and its public half is in
 `tauri.conf.json`. Back it up somewhere that outlives this Mac (Doppler, as ternt's is).
 **Never commit it**: losing it means installed copies can't update.
 
-**The GitHub token** is a fine-grained token with *Contents: Read and write* on the releases
+**The GitHub token** is a fine-grained token with *Contents: Read and write* on this
 repo only. Store it without it touching shell history:
 
 ```sh
@@ -77,9 +72,11 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
    - `Tokidoki_<version>_universal.dmg`: for new installs. This is the link to hand out.
    - `Tokidoki_<version>_universal.app.tar.gz`: the update installed copies download
    - `latest.json`: what installed copies check
-3. Within a few seconds of launch, and every 15 minutes after, installed copies download the
-   update in the background and install it when they quit; meanwhile a card in the sidebar
-   says it's ready (*Restart now* installs it right away).
+3. Within a few seconds of launch, every 15 minutes after, and when their window comes
+   forward after a couple of minutes away, installed copies download the update in the
+   background and install it when they quit; meanwhile a card in the sidebar says it's ready
+   (*Restart now* installs it right away). *Check for Updates…* in the Tokidoki menu, the
+   button under *Model and key*, and the version in the sidebar all check on the spot.
 
 If something fails halfway, nothing is published until the last step. The bump commit and tag
 stay local and the built, notarized files stay in `target/universal-apple-darwin/release/bundle/publish`:

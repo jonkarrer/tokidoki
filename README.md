@@ -26,6 +26,7 @@ key (`ANTHROPIC_API_KEY`, `FIREWORKS_API_KEY`, `BASETEN_API_KEY`) from the envir
 - `e2e/`: looks at the app without a person. `e2e/run.sh` runs each script in `e2e/tests`
   inside the window's page and saves pictures of it to `e2e/.out/`.
 - `scripts/`, `docs/RELEASING.md`: building, signing, notarizing and publishing the app.
+- `CASE_STUDY.md`: how it came to be built this way.
 
 Shared dependency versions go in the root `Cargo.toml` under `[workspace.dependencies]`.
 
@@ -33,9 +34,16 @@ Shared dependency versions go in the root `Cargo.toml` under `[workspace.depende
 
 It runs on the user's own key. They choose a provider (Anthropic, Fireworks or Baseten) and
 paste its key, which is kept in the macOS Keychain; the choice itself is `settings.json`
-beside the databases. Without a key the app still opens what it has, and only sending waits
+beside the databases. Two more keys are optional: Jev's (TypeSafe), for quicker and cheaper
+decisions about where a message belongs and what to remember, and Exa's, for research on
+the web. Voice (talking and being read to) runs on the Mac, with models it downloads on
+first use. Without a key the app still opens what it has, and only sending waits
 for one. Its data lives in `~/Library/Application Support/com.jokar.tokidoki` (`…/dev` for
 `just app`); point `just inspect --data <dir>` at it to read what the agent did.
 
 Closing the window leaves it running, so idle conversations still dream; quitting stops it,
 and the next launch resumes whatever was cut off.
+
+## License
+
+MIT. See `LICENSE`.
