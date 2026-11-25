@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Corner Shop</title>
+<!-- A small shop for e2e/tests/browser.js: a search that fills in results as a page built
+     with a framework would (after a moment, by script), a cart, a select, a post box and a
+     password field. -->
+<h1>Corner Shop</h1>
+<form id="search">
+  <input type="search" name="q" placeholder="Search the shop" />
+  <button>Search</button>
+</form>
+<p id="cart">Cart: 0 items</p>
+<ul id="results"></ul>
+<label>Deliver on <select id="day" aria-label="Delivery day"><option>Monday</option><option>Friday</option></select></label>
+<p id="chosen"></p>
+<div id="note" contenteditable="true" aria-label="Note for the driver"></div>
+<label>Password <input type="password" id="secret" value="hunter2" /></label>
+<a href="checkout.html">Go to your cart</a>
+<a href="checkout.html" target="_blank">Your cart, in a new window</a>
+<script>
+  let items = 0;
+  document.getElementById("search").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const q = new FormData(event.target).get("q");
+    setTimeout(() => {
+      document.getElementById("results").innerHTML = `<li>${q} <button>Add ${q} to cart</button></li>`;
+      document.querySelector("#results button").addEventListener("click", () => {
+        document.getElementById("cart").textContent = `Cart: ${++items} items`;
+      });
+    }, 300);
+  });
+  document.getElementById("day").addEventListener("change", (event) => {
+    document.getElementById("chosen").textContent = `Delivery on ${event.target.value}`;
+  });
+</script>

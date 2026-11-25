@@ -9,6 +9,7 @@
 //! keeps running while the window is closed, so idle threads still dream and unfinished work
 //! still finishes; quitting stops it, and the next launch resumes what was cut off.
 
+mod browser;
 mod debug;
 mod keys;
 mod settings;
@@ -121,6 +122,8 @@ fn open(app: &AppHandle) -> anyhow::Result<bool> {
     config.jev_key = keys::jev()?;
     // With an Exa key, research can be handed to workers that search the web.
     config.exa_key = keys::exa()?;
+    // A window of its own for a mission to browse in.
+    config.browser = Some(std::sync::Arc::new(browser::Page::new(app.clone())));
     // The voice models, shared by the installed app and development (they are big).
     config.voice_models = Some(models_dir(app)?);
     // Development: `TOKIDOKI_MODELS=cheap`, or a model by name.
@@ -562,6 +565,8 @@ pub fn run() {
             warm_voice,
             listen,
             speak,
+            browser::show_browser,
+            debug::debug_browser,
             updater::update_status,
             updater::check_for_updates,
             updater::install_update,

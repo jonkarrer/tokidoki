@@ -20,6 +20,11 @@ mkdir -p $OUT
 curl -s -o /dev/null localhost:1430 || { (cd $ROOT/app && bun run dev > $OUT/vite.log 2>&1 &); }
 for i in {1..80}; do curl -s -o /dev/null localhost:1430 && break; sleep 0.25; done
 
+# The pages in e2e/fixtures, for the browser test, on a port of their own.
+bun -e 'Bun.serve({ port: 1431, fetch: (r) => new Response(Bun.file(process.argv[1] + new URL(r.url).pathname)) })' $E2E/fixtures &
+fixtures=$!
+trap "kill $fixtures 2>/dev/null" EXIT
+
 tests=(${@:-$E2E/tests/*.js(:t:r)})
 failed=0
 for name in $tests; do

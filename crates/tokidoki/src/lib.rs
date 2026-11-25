@@ -14,6 +14,7 @@
 //! speakers are let in, all as the one user whose memory scope this instance reads and
 //! writes. (Several users, each with their own scope, is a later step.)
 
+mod browser_tools;
 mod events;
 mod note_tools;
 mod speech;
@@ -78,6 +79,9 @@ pub struct Config {
     /// Where the voice models are kept, downloaded on first use (`prepare_voice`): with a
     /// folder, tokidoki can listen and speak (`listen`, `speak`), all on this Mac.
     pub voice_models: Option<PathBuf>,
+    /// What shows web pages, where there is something to: with one, a mission can use a
+    /// browser (`browser_tools`). The app's is a web view of its own.
+    pub browser: Option<Arc<dyn browser::Engine>>,
     pub agent: agent::Settings,
     /// Record to the journal (`telemetry`), for `just inspect`.
     pub journal: bool,
@@ -104,6 +108,7 @@ impl std::fmt::Debug for Config {
             .field("jev_model", &self.jev_model)
             .field("exa_key", &self.exa_key.as_ref().map(|_| "<set>"))
             .field("voice_models", &self.voice_models)
+            .field("browser", &self.browser.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -234,6 +239,7 @@ impl Config {
             jev_model: jev::MODEL.into(),
             exa_key: None,
             voice_models: None,
+            browser: None,
             agent: agent::Settings::default(),
             journal: true,
         }
@@ -283,6 +289,8 @@ pub struct Parts<M> {
     pub review: Option<Arc<dyn agent::Review>>,
     /// Listening and speaking, when there is a folder for the models.
     pub voice: Option<Arc<voice::Voice>>,
+    /// The browser a mission drives, where there is one.
+    pub browser: Option<browser::Browser>,
 }
 
 /// The running system; cheap to clone.
@@ -405,6 +413,7 @@ impl Tokidoki {
             exa,
             review,
             voice: (config.voice_models.clone()).map(|dir| Arc::new(voice::Voice::new(dir))),
+            browser: config.browser.clone().map(browser::Browser::new),
         };
         Self::assemble(parts, asleep)
     }
@@ -422,13 +431,14 @@ impl Tokidoki {
         let mut tools = parts.tools;
         note_tools::add(&mut tools, &parts.notes);
         // A worker has its own tools, which the conversation doesn't.
-        let mission = worker_tools::mission(&parts.notes, parts.exa.as_ref());
+        let mission =
+            worker_tools::mission(&parts.notes, parts.exa.as_ref(), parts.browser.as_ref());
         let mut kinds = std::collections::HashMap::new();
         let mut names = vec![worker_tools::MISSION];
         kinds.insert(
             worker_tools::MISSION.to_string(),
             ThreadSetup {
-                system: Some(worker_tools::MISSION_PROMPT.into()),
+                system: Some(worker_tools::mission_prompt(parts.browser.is_some())),
                 tools: mission.specs(),
             },
         );

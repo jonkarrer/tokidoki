@@ -121,6 +121,7 @@ fn parts(replies: Vec<Reply>, store: Sqlite) -> (Parts<Script>, Arc<Script>) {
         exa: None,
         review: None,
         voice: None,
+        browser: None,
     };
     (parts, script)
 }
@@ -702,6 +703,7 @@ async fn research_goes_to_a_worker_and_comes_back() {
         journal: parts.journal,
         review: parts.review,
         voice: parts.voice,
+        browser: parts.browser,
     };
     let tokidoki = Tokidoki::build(parts).unwrap();
     let mut events = tokidoki.events();
@@ -754,7 +756,9 @@ struct Sides {
 
 impl Model for Sides {
     async fn chat(&self, ctx: &Context) -> Result<Response> {
-        match ctx.system.as_deref() == Some(worker_tools::MISSION_PROMPT) {
+        let mission = (ctx.system.as_deref())
+            .is_some_and(|system| system.starts_with(worker_tools::MISSION_PROMPT));
+        match mission {
             true => self.mission.chat(ctx).await,
             false => self.conversation.chat(ctx).await,
         }
@@ -800,6 +804,7 @@ async fn a_mission_is_done_on_its_own_thread_and_can_be_traced() {
         journal: parts.journal,
         review: parts.review,
         voice: parts.voice,
+        browser: parts.browser,
     };
     let tokidoki = Tokidoki::build(parts).unwrap();
     let mut events = tokidoki.events();
@@ -847,6 +852,132 @@ async fn a_mission_is_done_on_its_own_thread_and_can_be_traced() {
     let threads = tokidoki.threads().unwrap();
     assert_eq!(threads.len(), 1);
     assert_eq!(threads[0].id, sent.thread);
+}
+
+/// A shop's checkout page, to a browser: always loaded, and whatever is clicked "works".
+struct Checkout;
+
+impl browser::Engine for Checkout {
+    fn navigate<'a>(&'a self, _: &'a str) -> browser::EngineFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn eval<'a>(&'a self, script: &'a str) -> browser::EngineFuture<'a, String> {
+        Box::pin(async move {
+            let answer = if script.contains("__tkWatch") {
+                json!({ "ready": true, "quiet": true, "url": "https://shop.example/cart" })
+            } else if script.contains("const REF") {
+                json!({ "ok": true })
+            } else {
+                json!({
+                    "url": "https://shop.example/cart", "title": "Your cart", "text": "Oat milk",
+                    "elements": [
+                        { "ref": 1, "role": "button", "name": "Add one more" },
+                        { "ref": 2, "role": "button", "name": "Place your order" }
+                    ]
+                })
+            };
+            Ok(answer.to_string())
+        })
+    }
+}
+
+/// With a browser, a mission has its tools and is told how to use them; a click that would
+/// place an order is refused whatever the model wants, and the mission is told to stop.
+#[tokio::test]
+async fn a_mission_browses_and_cant_place_an_order_by_itself() {
+    let (parts, _) = parts(Vec::new(), Sqlite::memory().unwrap());
+    let script = |replies: Vec<Reply>| Script {
+        replies: Mutex::new(replies.into()),
+        ..Script::default()
+    };
+    let model = Arc::new(Sides {
+        conversation: script(vec![
+            Reply::Call(
+                "delegate",
+                json!({ "task": "Order the oat milk in my cart at shop.example.", "kind": "mission" }),
+            ),
+            Reply::Text("I'm on it."),
+            Reply::Text("It's in your cart; placing the order is yours to do."),
+        ]),
+        mission: script(vec![
+            Reply::Call("browser_open", json!({ "url": "shop.example/cart" })),
+            Reply::Call("browser_click", json!({ "ref": 1 })),
+            Reply::Call("browser_click", json!({ "ref": 2 })),
+            Reply::Text("Ready, not ordered: placing the order is left for you."),
+        ]),
+    });
+    let parts = Parts {
+        model: model.clone(),
+        browser: Some(browser::Browser::new(Arc::new(Checkout))),
+        exa: None,
+        store: parts.store,
+        mind: parts.mind,
+        router: parts.router,
+        memory: parts.memory,
+        scope: parts.scope,
+        notes: parts.notes,
+        tools: parts.tools,
+        system: parts.system,
+        settings: parts.settings,
+        speakers: parts.speakers,
+        journal: parts.journal,
+        review: parts.review,
+        voice: parts.voice,
+    };
+    let tokidoki = Tokidoki::build(parts).unwrap();
+    let mut events = tokidoki.events();
+    let sent = tokidoki
+        .send(me("Order the oat milk in my cart."))
+        .await
+        .unwrap();
+    settled(&tokidoki, &sent.submission).await;
+    let ended = |e: &Event| matches!(e, Event::Worker { worker } if worker.delivery.is_some());
+    let seen = until(&mut events, ended).await;
+    let Some(Event::Worker { worker }) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(worker.status, interface::WorkerStatus::Done);
+
+    let first = &model.mission.seen.lock().unwrap()[0];
+    assert!(
+        first
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("You have a web browser")
+    );
+    assert!(first.tools.iter().any(|t| t.name == "browser_click"));
+    // And the conversation, which sends the mission, knows it can browse.
+    let asked = &model.conversation.seen.lock().unwrap()[0];
+    assert!(asked.system.as_deref().unwrap().contains("browser_open"));
+    assert!(!asked.tools.iter().any(|t| t.name.starts_with("browser_")));
+
+    let results: Vec<(String, bool)> = (tokidoki.history(&worker.id, 0).unwrap().iter())
+        .filter_map(|event| match event {
+            Event::Checkpoint {
+                change: Change::Message { content, .. },
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            Content::ToolResult {
+                content, is_error, ..
+            } => Some((content.clone(), *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 3);
+    assert!(results[0].0.contains("[2] button \"Place your order\"") && !results[0].1);
+    assert!(!results[1].1, "an ordinary click goes through");
+    assert!(results[2].1, "placing the order is refused");
+    assert!(
+        results[2]
+            .0
+            .contains("clicking “Place your order” on shop.example needs the user's say-so")
+    );
 }
 
 /// A research question on real models (Anthropic's cheapest, with Jev and Exa: their keys in

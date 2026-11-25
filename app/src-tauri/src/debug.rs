@@ -94,3 +94,39 @@ fn snapshot(view: *const AnyObject, path: String, done: tokio::sync::oneshot::Se
         ];
     }
 }
+
+/// Drives the mission's browser by hand, for a test: `open` an address, `read`, `click` or
+/// `type` into a numbered element, go `back`. Answers with the page as a mission is shown it.
+#[tauri::command]
+pub async fn debug_browser(
+    app: AppHandle,
+    action: String,
+    url: Option<String>,
+    number: Option<u32>,
+    text: Option<String>,
+    submit: Option<bool>,
+) -> Result<String, String> {
+    if testing().is_none() {
+        return Err("only while testing".into());
+    }
+    // One browser for the test, so a step finds the numbers the step before it read.
+    static BROWSER: std::sync::OnceLock<browser::Browser> = std::sync::OnceLock::new();
+    let browser = BROWSER
+        .get_or_init(|| browser::Browser::new(std::sync::Arc::new(crate::browser::Page::new(app))));
+    let number = number.unwrap_or_default();
+    let page = match action.as_str() {
+        "open" => browser.open(&url.unwrap_or_default()).await,
+        "read" => browser.read().await,
+        "click" => browser.click(number).await,
+        "type" => {
+            let text = text.unwrap_or_default();
+            browser
+                .type_into(number, &text, submit.unwrap_or(false))
+                .await
+        }
+        "back" => browser.back().await,
+        other => return Err(format!("no browser action {other}")),
+    };
+    page.map(|page| page.describe())
+        .map_err(|e| format!("{e:#}"))
+}

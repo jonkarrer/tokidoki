@@ -50,7 +50,9 @@ pub fn prompt(kinds: &[&str], mission_tools: &[String]) -> String {
             " A job to go and do (not talk, not research, not a note: ordering, booking, \
              posting, filling something in, anything done in steps) goes to a mission worker, \
              which has these tools and no others: {}. If the job needs something they can't \
-             do, tell the user what you can't do yet instead of sending one.",
+             do, tell the user what you can't do yet instead of sending one. The browser \
+             tools, when it has them, drive one web browser with the user's saved logins: \
+             send one job that needs it at a time.",
             mission_tools.join(", ")
         ));
     }
@@ -95,14 +97,29 @@ pub fn research(exa: &Exa) -> Tools {
     tools
 }
 
-/// What a mission works with: the user's notes to read, and the web with Exa. (A browser
-/// comes next.)
-pub fn mission(notes: &Arc<notes::Notes>, exa: Option<&Exa>) -> Tools {
+/// What a mission works with: the user's notes to read, the web with Exa, and a browser
+/// where there is one to drive.
+pub fn mission(
+    notes: &Arc<notes::Notes>,
+    exa: Option<&Exa>,
+    browser: Option<&browser::Browser>,
+) -> Tools {
     let mut tools = crate::note_tools::reading(notes);
     if let Some(exa) = exa {
         tools.extend(research(exa));
     }
+    if let Some(browser) = browser {
+        tools.extend(crate::browser_tools::tools(browser));
+    }
     tools
+}
+
+/// The mission worker's system prompt: with a browser, also how to use it.
+pub fn mission_prompt(browser: bool) -> String {
+    match browser {
+        true => format!("{MISSION_PROMPT}\n\n{}", crate::browser_tools::PROMPT),
+        false => MISSION_PROMPT.to_string(),
+    }
 }
 
 /// The agent, and the kinds of worker there are.
