@@ -29,7 +29,8 @@ pub use idle::Idle;
 pub use live::{Live, Shown};
 pub use tool::{ToolCall, ToolCallInput, ToolOutput};
 pub use workers::{
-    Delivery, REPORT_OPEN, Report, Review, ReviewFuture, Worker, WorkerStatus, is_worker, worker_in,
+    Delivery, Job, LessonFuture, Lessons, REPORT_OPEN, Report, Review, ReviewFuture, Worker,
+    WorkerStatus, is_worker, steps_taken, worker_in,
 };
 
 use std::collections::HashMap;
@@ -280,7 +281,16 @@ pub fn register<M: Model>(
         .register(Generation::new(model, mind.clone(), settings.clone(), live))
         .register(ToolCall::new(tools))
         .register(Idle::new(mind, settings.clone()))
-        .register(Report::new(None, settings));
+        .register(Report::new(None, None, settings));
+}
+
+/// What the embedding code brings to workers.
+#[derive(Default)]
+pub struct WorkerHooks {
+    /// Decides whether a report is worth interrupting the user for.
+    pub review: Option<Arc<dyn Review>>,
+    /// What was learned doing jobs, for the next one like it.
+    pub lessons: Option<Arc<dyn Lessons>>,
 }
 
 /// `register`, with a `Review` that decides whether a worker's report is worth interrupting the
@@ -292,13 +302,13 @@ pub fn register_with_review<M: Model>(
     mind: Option<Arc<dyn Mind>>,
     settings: Settings,
     live: Live,
-    review: Option<Arc<dyn Review>>,
+    with: WorkerHooks,
 ) {
     registry
         .register(Generation::new(model, mind.clone(), settings.clone(), live))
         .register(ToolCall::new(tools))
         .register(Idle::new(mind, settings.clone()))
-        .register(Report::new(review, settings));
+        .register(Report::new(with.review, with.lessons, settings));
 }
 
 /// One of a mind's jobs: `Mind::consider`, `Mind::dream` or `Mind::settle`.
@@ -426,21 +436,14 @@ impl Agent {
         self
     }
 
-    /// Starts a worker of `kind` on `task` (`title` names it for the user), for the tool call
-    /// `call` in `thread` (`workers`). The same call again finds the worker it started.
-    pub fn delegate(
-        &self,
-        thread: &str,
-        call: &str,
-        kind: &str,
-        title: &str,
-        task: &str,
-    ) -> Result<Worker> {
-        let Some(setup) = self.workers.get(kind) else {
-            return Err(Rejected(format!("there is no {kind} worker")).into());
+    /// Starts a worker on `job`, for the tool call `call` in `thread` (`workers`). The same
+    /// call again finds the worker it started.
+    pub fn delegate(&self, thread: &str, call: &str, job: Job) -> Result<Worker> {
+        let Some(setup) = self.workers.get(job.kind) else {
+            return Err(Rejected(format!("there is no {} worker", job.kind)).into());
         };
         self.engine
-            .commit(|tx| workers::delegate(tx, setup, thread, call, kind, title, task))
+            .commit(|tx| workers::delegate(tx, setup, thread, call, job))
     }
 
     /// Every worker there has been, oldest first.

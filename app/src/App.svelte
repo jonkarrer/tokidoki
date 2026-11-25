@@ -39,8 +39,8 @@
   // Research: whether a worker is looking into something now, and how many reports there are.
   const looking = $derived(app.workers.some((w) => w.kind === "research" && w.status === "running"));
   // Missions: whether a worker is out on one now, and how many there have been.
-  const out = $derived(app.workers.some((w) => w.kind === "mission" && w.status === "running"));
-  const missions = $derived(app.workers.filter((w) => w.kind === "mission").length);
+  const out = $derived(app.workers.some((w) => w.kind !== "research" && w.status === "running"));
+  const missions = $derived(app.workers.filter((w) => w.kind !== "research").length);
   const researched = $derived(app.workers.filter((w) => w.kind === "research" && w.status === "done").length);
 
   // What Tokidoki is doing in the conversation, shown beside it from anywhere in the app.

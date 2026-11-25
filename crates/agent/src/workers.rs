@@ -4,6 +4,10 @@
 //! it where it was). It is started by a tool call (`Agent::delegate`), once per call however
 //! often a crash makes that call run again.
 //!
+//! What was learned doing one kind of job is used for the next (`Lessons`): the procedures
+//! that fit a job go in the worker's brief, and when it comes back, how it did the job is
+//! written down, off to the side, so the report isn't kept waiting.
+//!
 //! When it ends, its report goes back to the thread that asked for it (`Report`, a task on
 //! that thread): delivered as a new input, so the model tells the user now, when the user is
 //! still there (the thread is the one they were in last, and hot) or a `Review` (Jev) judges
@@ -54,6 +58,9 @@ pub struct Worker {
     pub title: String,
     /// What it was asked, in full: its brief.
     pub task: String,
+    /// The procedures from memory it was given with the brief, by name.
+    #[serde(default)]
+    pub knew: Vec<String>,
     pub status: WorkerStatus,
     /// Ms since the epoch.
     pub started_at: u64,
@@ -97,7 +104,19 @@ fn save(tx: &mut Tx, worker: &Worker) -> Result<()> {
     tx.put_doc(&record_key(&worker.id), worker)
 }
 
-/// Starts a worker of `kind` on `task` for the tool call `call` in `thread`, set up with
+/// What a worker is started with.
+pub struct Job<'a> {
+    pub kind: &'a str,
+    /// A few words naming it, for the user's list.
+    pub title: &'a str,
+    /// What to do, standing alone.
+    pub task: &'a str,
+    /// What is known about doing it, sent after the task, with the names of the procedures
+    /// it holds (`Lessons::recall`).
+    pub known: Option<(&'a str, &'a [String])>,
+}
+
+/// Starts a worker on `job` for the tool call `call` in `thread`, set up with
 /// `setup`; the same call again finds the worker it started. A second worker of the same kind
 /// in the same turn is refused: the model asked twice for one piece of work.
 pub(crate) fn delegate(
@@ -105,10 +124,14 @@ pub(crate) fn delegate(
     setup: &crate::ThreadSetup,
     thread: &str,
     call: &str,
-    kind: &str,
-    title: &str,
-    task: &str,
+    job: Job,
 ) -> Result<Worker> {
+    let Job {
+        kind,
+        title,
+        task,
+        known,
+    } = job;
     if let Some(id) = tx.doc::<String>(&delegated_key(thread, call))? {
         return load(tx, &id);
     }
@@ -130,7 +153,10 @@ pub(crate) fn delegate(
     let id = format!("{PREFIX}{n}");
     setup.apply(tx, &id)?;
     let draft = Draft {
-        text: task.to_string(),
+        text: match known {
+            Some((known, _)) => format!("{task}\n\n{known}"),
+            None => task.to_string(),
+        },
         request_id: None,
         when_busy: WhenBusy::FollowUp,
     };
@@ -142,6 +168,7 @@ pub(crate) fn delegate(
         kind: kind.to_string(),
         title: title.to_string(),
         task: task.to_string(),
+        knew: known.map(|(_, names)| names.to_vec()).unwrap_or_default(),
         status: WorkerStatus::Running,
         started_at: tx.now(),
         ended_at: None,
@@ -199,15 +226,82 @@ pub trait Review: Send + Sync + 'static {
     fn deliver<'a>(&'a self, worker: &'a Worker, now: &'a [String]) -> ReviewFuture<'a>;
 }
 
+pub type LessonFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// What was learned doing jobs, kept for the next one like it (procedural memory, in
+/// `tokidoki`). Neither may fail a job: what can't be recalled or learned is done without.
+pub trait Lessons: Send + Sync + 'static {
+    /// What is known about doing `task` as a worker of `kind`: text for its brief, and the
+    /// names of the procedures in it.
+    fn recall<'a>(
+        &'a self,
+        kind: &'a str,
+        task: &'a str,
+    ) -> LessonFuture<'a, Option<(String, Vec<String>)>>;
+
+    /// `worker` came back: learn from the steps it took (`did`, as `steps_taken` reads them).
+    fn learn<'a>(&'a self, worker: &'a Worker, did: &'a str) -> LessonFuture<'a, ()>;
+}
+
+/// The steps a worker took, from its thread, for learning from: each tool it used with what
+/// it was given and the start of what came back, and what it said between.
+pub fn steps_taken(thread: &state::Thread) -> String {
+    /// How much of a tool's result is worth reading to learn how the job went.
+    const RESULT_CHARS: usize = 400;
+    let mut lines = Vec::new();
+    let mut names = std::collections::HashMap::new();
+    for checkpoint in thread.checkpoints() {
+        let state::Event::Message(message) = &checkpoint.event else {
+            continue;
+        };
+        for block in &message.content {
+            match block {
+                context::Block::Text { text } if message.role == context::Role::Assistant => {
+                    lines.push(format!("said: {}", text.trim()));
+                }
+                context::Block::ToolCall { id, name, input } => {
+                    names.insert(id.clone(), name.clone());
+                    lines.push(format!("used {name} {input}"));
+                }
+                context::Block::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                } => {
+                    let start: String = content.chars().take(RESULT_CHARS).collect();
+                    let name = names.get(call_id).map(String::as_str).unwrap_or("tool");
+                    let how = if *is_error {
+                        "refused or failed"
+                    } else {
+                        "gave"
+                    };
+                    lines.push(format!("{name} {how}: {}", start.trim()));
+                }
+                _ => {}
+            }
+        }
+    }
+    lines.join("\n")
+}
+
 /// Takes a worker's report back to the thread that asked for it, on that thread.
 pub struct Report {
     review: Option<Arc<dyn Review>>,
+    lessons: Option<Arc<dyn Lessons>>,
     settings: Settings,
 }
 
 impl Report {
-    pub fn new(review: Option<Arc<dyn Review>>, settings: Settings) -> Self {
-        Self { review, settings }
+    pub fn new(
+        review: Option<Arc<dyn Review>>,
+        lessons: Option<Arc<dyn Lessons>>,
+        settings: Settings,
+    ) -> Self {
+        Self {
+            review,
+            lessons,
+            settings,
+        }
     }
 }
 
@@ -261,10 +355,20 @@ impl Task for Report {
                         None => Vec::new(),
                     };
                     let still_there = last.as_deref() == Some(thread.as_str()) && hot;
-                    read = Some((worker, still_there, now));
+                    let did = match self.lessons {
+                        Some(_) => Some(steps_taken(tx.thread(&id)?)),
+                        None => None,
+                    };
+                    read = Some((worker, still_there, now, did));
                     Ok(None)
                 })?;
-                let (worker, still_there, now) = read.context("nothing read")?;
+                let (worker, still_there, now, did) = read.context("nothing read")?;
+                // Learning from the job goes on beside the report, which doesn't wait for
+                // it. A crash here loses the lesson, not the work.
+                if let (Some(lessons), Some(did)) = (self.lessons.clone(), did) {
+                    let worker = worker.clone();
+                    tokio::spawn(async move { lessons.learn(&worker, &did).await });
+                }
                 match (still_there, &self.review) {
                     (true, _) => true,
                     (false, Some(review)) => review.deliver(&worker, &now).await,

@@ -174,7 +174,7 @@
       {#each looking as worker (worker.id)}
         <p class="looking">
           <Presence doing={{ kind: "tool", name: worker.kind }} size={18} />
-          <span>{worker.kind === "mission" ? "On a mission" : "Looking into"}: {worker.title || worker.task}</span>
+          <span>{worker.kind === "mission" ? "On a mission" : worker.kind === "learning" ? "Learning" : "Looking into"}: {worker.title || worker.task}</span>
           <button onclick={() => cancelWorker(worker.id)}>Stop</button>
         </p>
       {/each}

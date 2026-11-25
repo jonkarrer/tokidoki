@@ -11,6 +11,11 @@
 //!             conversation can do in a step or two itself (reading a note), not a single
 //!             look-up, and not research (the public web, searched, written up). Everything
 //!             it did is its thread, which the app shows as the mission's trace.
+//!   learning  goes and learns what the user points it at ("learn about my app from its
+//!             site"), with the mission's tools, so it can read a page on the user's own
+//!             network or behind a login as well as the public web. What it brings back is
+//!             put in memory as facts (`Procedures`), which is the point of it: the user
+//!             building what tokidoki knows.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -30,6 +35,7 @@ fn agent(late: &Late) -> anyhow::Result<&Agent> {
 
 pub(crate) const RESEARCH: &str = "research";
 pub(crate) const MISSION: &str = "mission";
+pub(crate) const LEARNING: &str = "learning";
 
 /// What the system prompt says of workers, beside the tools: of the `kinds` there are, and
 /// of what a mission can do (`mission_tools`, by name), so one isn't sent on a job its tools
@@ -69,6 +75,17 @@ pub fn prompt(kinds: &[&str], mission_tools: &[String]) -> String {
             mission_tools.join(", ")
         ));
     }
+    if kinds.contains(&LEARNING) {
+        text.push_str(
+            " When the user asks you to go and learn something and remember it (\"learn \
+             about my app from its site\", \"study this and commit it to memory\"), send a \
+             learning worker: say what to learn and where they said to look, with any \
+             address exactly as they gave it. It reads pages straight from this computer, \
+             so it reaches the user's own network. What it finds is put in memory when it \
+             comes back; you don't save it yourself. What the user tells you directly is \
+             remembered without a worker.",
+        );
+    }
     text.push_str(
         " A message that starts with <worker-report> is a worker's report, not the user \
          speaking: follow the note under it. `list_workers` shows what is running; \
@@ -93,12 +110,19 @@ fails. You have no memory of the user beyond the job you were given and what you
 you. Don't ask questions: nobody will answer them; if something only the user can decide or \
 do stands in the way, stop there. Never claim a step you didn't do. End with a short report \
 in Markdown: whether the job is done, what you did, and what is left for the user, if \
-anything. If your tools can't do the job, say so at once and what would be needed.";
+anything. If your tools can't do the job, say so at once and what would be needed. When the \
+job comes with <procedures>, they are how jobs like it were done before: start from them and \
+don't work out again what they already settle.";
 
 /// Adds the tools that hand work to workers of `kinds`.
-pub fn add(tools: &mut Tools, late: &Late, kinds: &[&'static str]) {
+pub fn add(
+    tools: &mut Tools,
+    late: &Late,
+    kinds: &[&'static str],
+    lessons: Option<Arc<dyn agent::Lessons>>,
+) {
     tools
-        .add(Delegate(late.clone(), kinds.to_vec()))
+        .add(Delegate(late.clone(), kinds.to_vec(), lessons))
         .add(ListWorkers(late.clone()))
         .add(CancelWorker(late.clone()));
 }
@@ -110,14 +134,16 @@ pub fn research(exa: &Exa) -> Tools {
     tools
 }
 
-/// What a mission works with: the user's notes to read, the web with Exa, and a browser
-/// where there is one to drive.
+/// What a mission works with: the user's notes to read, pages read straight from this
+/// computer, the web with Exa, and a browser where there is one to drive.
 pub fn mission(
     notes: &Arc<notes::Notes>,
     exa: Option<&Exa>,
     browser: Option<&browser::Browser>,
 ) -> Tools {
     let mut tools = crate::note_tools::reading(notes);
+    // Pages read straight from this computer: the user's own network, with no browser.
+    tools.add(crate::page::FetchPage::new());
     if let Some(exa) = exa {
         tools.extend(research(exa));
     }
@@ -125,6 +151,29 @@ pub fn mission(
         tools.extend(crate::browser_tools::tools(browser));
     }
     tools
+}
+
+/// The learning worker's system prompt.
+pub const LEARNING_PROMPT: &str = "You are sent to learn something for a personal assistant, \
+which will remember what you bring back. You get what to learn and where to look, and no \
+conversation. Read the source through with fetch_page: read the address you were given, \
+follow its own links to the pages that bear on what you were asked (about, features, \
+pricing, docs), and read each. fetch_page reads straight from this computer, so it reaches \
+the user's own network. Use the browser only for a page that comes back with little text or \
+wants a sign-in. Only read: don't fill \
+in forms, sign up, or change anything. Don't ask questions: nobody will answer them. If a \
+page wants a login, say so and go on with what you can reach. End with a report in Markdown: \
+\"Learned:\" and then a list of facts, one per line, each a full sentence that names its \
+subject and stands alone, specific (names, numbers, prices, what it does, who it is for), \
+and only what the source says; then \"Sources:\" with each address you read; then anything \
+you were asked to learn and couldn't find.";
+
+/// The learning worker's system prompt: with a browser, also how to use it.
+pub fn learning_prompt(browser: bool) -> String {
+    match browser {
+        true => format!("{LEARNING_PROMPT}\n\n{}", crate::browser_tools::PROMPT),
+        false => LEARNING_PROMPT.to_string(),
+    }
 }
 
 /// The mission worker's system prompt: with a browser, also how to use it.
@@ -135,8 +184,8 @@ pub fn mission_prompt(browser: bool) -> String {
     }
 }
 
-/// The agent, and the kinds of worker there are.
-struct Delegate(Late, Vec<&'static str>);
+/// The agent, the kinds of worker there are, and what was learned doing earlier jobs.
+struct Delegate(Late, Vec<&'static str>, Option<Arc<dyn agent::Lessons>>);
 
 impl Tool for Delegate {
     fn spec(&self) -> context::Tool {
@@ -157,7 +206,8 @@ impl Tool for Delegate {
                         "type": "string",
                         "enum": self.1,
                         "description": "research finds something out and reports; mission \
-                                        goes and does a job."
+                                        goes and does a job; learning reads what the user \
+                                        points at and puts it in memory."
                     },
                     "title": {
                         "type": "string",
@@ -192,8 +242,18 @@ impl Tool for Delegate {
                     None => bail!("delegate needs a kind: one of {}", kinds.join(", ")),
                 },
             };
-            let worker =
-                (agent(&self.0)?).delegate(&call.thread, &call.id, kind, title.trim(), &task)?;
+            // What was learned doing jobs like it goes with the brief.
+            let known = match &self.2 {
+                Some(lessons) => lessons.recall(kind, &task).await,
+                None => None,
+            };
+            let job = agent::Job {
+                kind,
+                title: title.trim(),
+                task: &task,
+                known: (known.as_ref()).map(|(text, names)| (text.as_str(), names.as_slice())),
+            };
+            let worker = agent(&self.0)?.delegate(&call.thread, &call.id, job)?;
             Ok(format!(
                 "Started {} on it. Its report comes back on its own: tell the user you're on it.",
                 worker.id
@@ -453,6 +513,7 @@ pub(crate) fn shown(worker: Worker) -> interface::Worker {
             agent::WorkerStatus::Failed => S::Failed,
             agent::WorkerStatus::Cancelled => S::Cancelled,
         },
+        knew: worker.knew,
         started_at: worker.started_at,
         ended_at: worker.ended_at,
         report: worker.report,
@@ -460,6 +521,79 @@ pub(crate) fn shown(worker: Worker) -> interface::Worker {
             agent::Delivery::Delivered => D::Delivered,
             agent::Delivery::Held => D::Held,
         }),
+    }
+}
+
+/// What workers add to memory (`experience::lessons`). A mission: the procedures that fit a
+/// job go in its brief, and one that comes back is learned from, as how the job is done.
+/// Learning: what it brings back is kept as facts. Research adds nothing: a report is found
+/// afresh each time.
+pub struct Procedures<A>(pub Arc<experience::Experience<A>>);
+
+impl<A: inference::providers::Api + Send + Sync + 'static> agent::Lessons for Procedures<A> {
+    fn recall<'a>(
+        &'a self,
+        kind: &'a str,
+        task: &'a str,
+    ) -> agent::LessonFuture<'a, Option<(String, Vec<String>)>> {
+        Box::pin(async move {
+            if kind != MISSION {
+                return None;
+            }
+            let procedures = match self.0.procedures_for(task).await {
+                Ok(procedures) => procedures,
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "no procedures recalled");
+                    return None;
+                }
+            };
+            let names = (procedures.iter())
+                .filter_map(|item| match &item.body {
+                    memory::Body::Procedural { name, .. } => Some(name.clone()),
+                    memory::Body::Semantic { .. } => None,
+                })
+                .collect();
+            Some((experience::procedures_brief(&procedures)?, names))
+        })
+    }
+
+    fn learn<'a>(&'a self, worker: &'a Worker, did: &'a str) -> agent::LessonFuture<'a, ()> {
+        Box::pin(async move {
+            if worker.status == agent::WorkerStatus::Cancelled {
+                return;
+            }
+            if worker.kind == LEARNING {
+                // What it couldn't finish it didn't learn.
+                if let (agent::WorkerStatus::Done, Some(found)) = (worker.status, &worker.report) {
+                    let source = memory::Source {
+                        thread: worker.id.clone(),
+                        checkpoint: 0,
+                    };
+                    let kept = (self.0)
+                        .keep_what_was_learned(&worker.task, found, source)
+                        .await;
+                    if let Err(error) = kept {
+                        tracing::warn!(worker = %worker.id, error = %format!("{error:#}"), "what was learned wasn't kept");
+                    }
+                }
+                return;
+            }
+            if worker.kind != MISSION {
+                return;
+            }
+            let source = memory::Source {
+                thread: worker.id.clone(),
+                checkpoint: 0,
+            };
+            let done = worker.status == agent::WorkerStatus::Done;
+            let report = worker.report.as_deref().unwrap_or_default();
+            let learned = (self.0)
+                .learn_procedure(&worker.task, did, report, done, source)
+                .await;
+            if let Err(error) = learned {
+                tracing::warn!(worker = %worker.id, error = %format!("{error:#}"), "nothing learned from the mission");
+            }
+        })
     }
 }
 

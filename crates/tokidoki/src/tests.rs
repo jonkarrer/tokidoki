@@ -122,6 +122,7 @@ fn parts(replies: Vec<Reply>, store: Sqlite) -> (Parts<Script>, Arc<Script>) {
         review: None,
         voice: None,
         browser: None,
+        lessons: None,
     };
     (parts, script)
 }
@@ -703,6 +704,7 @@ async fn research_goes_to_a_worker_and_comes_back() {
         journal: parts.journal,
         review: parts.review,
         voice: parts.voice,
+        lessons: parts.lessons,
         browser: parts.browser,
     };
     let tokidoki = Tokidoki::build(parts).unwrap();
@@ -804,6 +806,7 @@ async fn a_mission_is_done_on_its_own_thread_and_can_be_traced() {
         journal: parts.journal,
         review: parts.review,
         voice: parts.voice,
+        lessons: parts.lessons,
         browser: parts.browser,
     };
     let tokidoki = Tokidoki::build(parts).unwrap();
@@ -823,7 +826,7 @@ async fn a_mission_is_done_on_its_own_thread_and_can_be_traced() {
     // The mission ran as itself: its prompt, its tools, nothing to hand work on with.
     let first = &model.mission.seen.lock().unwrap()[0];
     let tools: Vec<&str> = first.tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(tools, ["get_note", "search_notes"]);
+    assert_eq!(tools, ["fetch_page", "get_note", "search_notes"]);
 
     // Its thread is the trace: the job, the step it took and what came of it, the report.
     let trace = tokidoki.history(&worker.id, 0).unwrap();
@@ -924,6 +927,7 @@ async fn a_mission_browses_and_cant_place_an_order_by_itself() {
         journal: parts.journal,
         review: parts.review,
         voice: parts.voice,
+        lessons: parts.lessons,
     };
     let tokidoki = Tokidoki::build(parts).unwrap();
     let mut events = tokidoki.events();
@@ -977,6 +981,201 @@ async fn a_mission_browses_and_cant_place_an_order_by_itself() {
         results[2]
             .0
             .contains("clicking “Place your order” on shop.example needs the user's say-so")
+    );
+}
+
+/// Procedural memory, as a test keeps it: one procedure to recall, and what it was asked to
+/// learn from.
+#[derive(Default)]
+struct Kept(Mutex<Vec<(String, String)>>);
+
+impl agent::Lessons for Kept {
+    fn recall<'a>(
+        &'a self,
+        kind: &'a str,
+        _: &'a str,
+    ) -> agent::LessonFuture<'a, Option<(String, Vec<String>)>> {
+        Box::pin(async move {
+            let known = "<procedures>\nOrder at the shop: open shop.example/cart\n</procedures>";
+            (kind == "mission").then(|| (known.to_string(), vec!["Order at the shop".to_string()]))
+        })
+    }
+
+    fn learn<'a>(&'a self, worker: &'a agent::Worker, did: &'a str) -> agent::LessonFuture<'a, ()> {
+        Box::pin(async move {
+            let learned = (worker.id.clone(), did.to_string());
+            self.0.lock().unwrap().push(learned);
+        })
+    }
+}
+
+/// A mission starts with what was learned doing jobs like it, after its job and apart from
+/// it; and when it comes back, the steps it took are handed over to be learned from.
+#[tokio::test]
+async fn a_mission_starts_from_what_was_learned_and_is_learned_from() {
+    let (parts, _) = parts(Vec::new(), Sqlite::memory().unwrap());
+    let script = |replies: Vec<Reply>| Script {
+        replies: Mutex::new(replies.into()),
+        ..Script::default()
+    };
+    let model = Arc::new(Sides {
+        conversation: script(vec![
+            Reply::Call(
+                "delegate",
+                json!({ "task": "Order the oat milk in my cart at shop.example.", "kind": "mission" }),
+            ),
+            Reply::Text("I'm on it."),
+            Reply::Text("It's ready in your cart."),
+        ]),
+        mission: script(vec![
+            Reply::Call("browser_open", json!({ "url": "shop.example/cart" })),
+            Reply::Call("browser_click", json!({ "ref": 2 })),
+            Reply::Text("Ready, not ordered."),
+        ]),
+    });
+    let kept = Arc::new(Kept::default());
+    let parts = Parts {
+        model: model.clone(),
+        browser: Some(browser::Browser::new(Arc::new(Checkout))),
+        lessons: Some(kept.clone()),
+        exa: None,
+        store: parts.store,
+        mind: parts.mind,
+        router: parts.router,
+        memory: parts.memory,
+        scope: parts.scope,
+        notes: parts.notes,
+        tools: parts.tools,
+        system: parts.system,
+        settings: parts.settings,
+        speakers: parts.speakers,
+        journal: parts.journal,
+        review: parts.review,
+        voice: parts.voice,
+    };
+    let tokidoki = Tokidoki::build(parts).unwrap();
+    let mut events = tokidoki.events();
+    let sent = tokidoki
+        .send(me("Order the oat milk in my cart."))
+        .await
+        .unwrap();
+    settled(&tokidoki, &sent.submission).await;
+    let ended = |e: &Event| matches!(e, Event::Worker { worker } if worker.delivery.is_some());
+    let seen = until(&mut events, ended).await;
+    let Some(Event::Worker { worker }) = seen.last() else {
+        unreachable!()
+    };
+
+    // The job is kept as it was given; the procedures went with it to the worker.
+    assert_eq!(
+        worker.task,
+        "Order the oat milk in my cart at shop.example."
+    );
+    assert_eq!(worker.knew, ["Order at the shop"]);
+    let first = &model.mission.seen.lock().unwrap()[0];
+    let brief = first.messages.last().unwrap().text();
+    assert!(brief.starts_with("Order the oat milk in my cart at shop.example.\n\n<procedures>"));
+
+    // And what it did is there to learn from: the tools, what they were given, how they went.
+    let learned = kept.0.lock().unwrap();
+    assert_eq!(learned.len(), 1);
+    let (id, did) = &learned[0];
+    assert_eq!(*id, worker.id);
+    assert!(
+        did.contains(r#"used browser_open {"url":"shop.example/cart"}"#),
+        "{did}"
+    );
+    assert!(did.contains("browser_open gave: Page: Your cart"), "{did}");
+    assert!(
+        did.contains("browser_click refused or failed: Not done: clicking “Place your order”"),
+        "{did}"
+    );
+    assert!(did.contains("said: Ready, not ordered."), "{did}");
+}
+
+/// The conversation's model and a learning worker's, each with its own script.
+struct Learner {
+    conversation: Script,
+    worker: Script,
+}
+
+impl Model for Learner {
+    async fn chat(&self, ctx: &Context) -> Result<Response> {
+        let learning = (ctx.system.as_deref())
+            .is_some_and(|system| system.starts_with(worker_tools::LEARNING_PROMPT));
+        match learning {
+            true => self.worker.chat(ctx).await,
+            false => self.conversation.chat(ctx).await,
+        }
+    }
+}
+
+/// Sent to learn something, a worker runs as a learning worker (its own prompt, the
+/// mission's tools), and what it brings back is handed over to be put in memory.
+#[tokio::test]
+async fn what_a_learning_worker_brings_back_is_handed_to_memory() {
+    let (parts, _) = parts(Vec::new(), Sqlite::memory().unwrap());
+    let script = |replies: Vec<Reply>| Script {
+        replies: Mutex::new(replies.into()),
+        ..Script::default()
+    };
+    let model = Arc::new(Learner {
+        conversation: script(vec![
+            Reply::Call(
+                "delegate",
+                json!({ "task": "Learn what Bernt does from https://bernt.app.", "kind": "learning" }),
+            ),
+            Reply::Text("I'm on it."),
+            Reply::Text("I've learned what Bernt does."),
+        ]),
+        worker: script(vec![Reply::Text(
+            "Learned:\n- Bernt is an iOS app.\n\nSources: https://bernt.app",
+        )]),
+    });
+    let kept = Arc::new(Kept::default());
+    let parts = Parts {
+        model: model.clone(),
+        lessons: Some(kept.clone()),
+        browser: parts.browser,
+        exa: None,
+        store: parts.store,
+        mind: parts.mind,
+        router: parts.router,
+        memory: parts.memory,
+        scope: parts.scope,
+        notes: parts.notes,
+        tools: parts.tools,
+        system: parts.system,
+        settings: parts.settings,
+        speakers: parts.speakers,
+        journal: parts.journal,
+        review: parts.review,
+        voice: parts.voice,
+    };
+    let tokidoki = Tokidoki::build(parts).unwrap();
+    let mut events = tokidoki.events();
+    let sent = tokidoki
+        .send(me("Go learn about my app from bernt.app and remember it."))
+        .await
+        .unwrap();
+    settled(&tokidoki, &sent.submission).await;
+    let ended = |e: &Event| matches!(e, Event::Worker { worker } if worker.delivery.is_some());
+    let seen = until(&mut events, ended).await;
+    let Some(Event::Worker { worker }) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(worker.kind, "learning");
+    assert!(worker.report.as_deref().unwrap().starts_with("Learned:"));
+    assert!(worker.knew.is_empty(), "procedures are for missions");
+    let asked = &model.conversation.seen.lock().unwrap()[0];
+    assert!(asked.system.as_deref().unwrap().contains("learning worker"));
+    // It ran as a learning worker, with what a mission has to read with.
+    let learner = &model.worker.seen.lock().unwrap()[0];
+    assert!(learner.tools.iter().any(|t| t.name == "search_notes"));
+    assert_eq!(
+        kept.0.lock().unwrap().len(),
+        1,
+        "what it found was handed over"
     );
 }
 

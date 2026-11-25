@@ -164,7 +164,8 @@ fn open(app: &AppHandle) -> anyhow::Result<bool> {
 fn put_browser_away(app: &AppHandle, tokidoki: &Tokidoki) {
     let out = tokidoki.workers(&Speaker::owner()).is_ok_and(|workers| {
         let running = tokidoki::interface::WorkerStatus::Running;
-        (workers.iter()).any(|worker| worker.kind == "mission" && worker.status == running)
+        // Missions and learning browse; research doesn't.
+        (workers.iter()).any(|worker| worker.kind != "research" && worker.status == running)
     });
     if !out {
         browser::put_away(app);

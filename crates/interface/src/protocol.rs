@@ -429,12 +429,17 @@ pub struct Worker {
     pub id: String,
     /// The thread that asked for it.
     pub parent: String,
-    /// What kind of worker: `research` (finds something out) or `mission` (does a job).
+    /// What kind of worker: `research` (finds something out), `mission` (does a job) or
+    /// `learning` (reads what the user points at, and what it finds is put in memory).
     pub kind: String,
     /// A few words naming it.
     pub title: String,
     /// What it was asked to do, in full: its brief.
     pub task: String,
+    /// The procedures from memory it was given with the job, by name: how jobs like it were
+    /// done before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knew: Vec<String>,
     pub status: WorkerStatus,
     /// Ms since the epoch.
     pub started_at: u64,

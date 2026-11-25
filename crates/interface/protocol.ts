@@ -191,7 +191,8 @@ id: string,
  */
 parent: string, 
 /**
- * What kind of worker: `research` (finds something out) or `mission` (does a job).
+ * What kind of worker: `research` (finds something out), `mission` (does a job) or
+ * `learning` (reads what the user points at, and what it finds is put in memory).
  */
 kind: string, 
 /**
@@ -201,7 +202,12 @@ title: string,
 /**
  * What it was asked to do, in full: its brief.
  */
-task: string, status: WorkerStatus, 
+task: string, 
+/**
+ * The procedures from memory it was given with the job, by name: how jobs like it were
+ * done before.
+ */
+knew?: Array<string>, status: WorkerStatus, 
 /**
  * Ms since the epoch.
  */

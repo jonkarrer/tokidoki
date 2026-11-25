@@ -208,19 +208,40 @@ impl Browser {
         if url.is_empty() {
             bail!("open needs an address");
         }
-        let scheme = url
-            .split_once(':')
-            .is_some_and(|(scheme, _)| scheme.chars().all(|c| c.is_ascii_alphanumeric()));
-        let url = match scheme {
+        // `localhost:8080` names a port, not a scheme: a scheme is what comes before `://`.
+        let named = url.contains("://");
+        // Without one, a colon can only come before a port: `javascript:…` is not a site.
+        let host = url.split(['/', '?', '#']).next().unwrap_or_default();
+        let port = host.split_once(':').map(|(_, port)| port);
+        if !named && port.is_some_and(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit())) {
+            bail!("only web pages can be opened (http or https)");
+        }
+        let first = match named {
             true => url.to_string(),
             false => format!("https://{url}"),
         };
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
+        if !(first.starts_with("https://") || first.starts_with("http://")) {
             bail!("only web pages can be opened (http or https)");
         }
         let mut last = self.last.lock().await;
-        self.engine.navigate(&url).await?;
-        self.read_into(&mut last, Some(&url)).await
+        let before = last.as_ref().map(|page| page.url.clone());
+        // A site on the user's own network often has no https: when none was asked for and
+        // it doesn't open, plain http is tried.
+        let tries = match named {
+            true => vec![first],
+            false => vec![first, format!("http://{url}")],
+        };
+        for address in &tries {
+            self.engine.navigate(address).await?;
+            let page = self.read_into(&mut last, Some(address)).await?;
+            // Still on a blank page, or on the page it was on: nothing loaded.
+            let stayed = page.url == "about:blank"
+                || (before.as_deref() == Some(page.url.as_str()) && page.url != *address);
+            if !stayed {
+                return Ok(page);
+            }
+        }
+        bail!("{url} didn't open: it may be down, misspelled, or not reachable from this Mac")
     }
 
     /// The page as it is now, freshly numbered.
@@ -423,8 +444,54 @@ mod tests {
              [3] textbox \"Password\" (sensitive)"
         );
         assert_eq!(browser.element(2).await.unwrap().name, "Add to Cart");
+        // A port isn't a scheme.
+        let local = browser.open("localhost:1431/shop.html").await.unwrap();
+        assert_eq!(local.url, "https://localhost:1431/shop.html");
         assert!(browser.open("file:///etc/passwd").await.is_err());
         assert!(browser.open("javascript:alert(1)").await.is_err());
+    }
+
+    /// A site that only answers on plain http, as one on a home network may.
+    #[derive(Default)]
+    struct HttpOnly(Sync<String>);
+
+    impl Engine for HttpOnly {
+        fn navigate<'a>(&'a self, url: &'a str) -> EngineFuture<'a, ()> {
+            Box::pin(async move {
+                if url.starts_with("http://") {
+                    *self.0.lock().unwrap() = url.to_string();
+                }
+                Ok(())
+            })
+        }
+
+        fn eval<'a>(&'a self, script: &'a str) -> EngineFuture<'a, String> {
+            Box::pin(async move {
+                let loaded = self.0.lock().unwrap().clone();
+                let url = if loaded.is_empty() {
+                    "about:blank".to_string()
+                } else {
+                    loaded
+                };
+                let answer = if script.contains("__tkWatch") {
+                    serde_json::json!({ "ready": true, "quiet": true, "url": url })
+                } else {
+                    serde_json::json!({ "url": url, "title": "HQ", "text": "", "elements": [] })
+                };
+                Ok(answer.to_string())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_site_with_no_https_opens_on_http_and_one_that_isnt_there_says_so() {
+        let browser = Browser::new(Arc::new(HttpOnly::default()));
+        let page = browser.open("hq.home.example").await.unwrap();
+        assert_eq!(page.url, "http://hq.home.example");
+        // Asked for by https outright, it isn't quietly downgraded.
+        let browser = Browser::new(Arc::new(HttpOnly::default()));
+        let refused = browser.open("https://hq.home.example").await.unwrap_err();
+        assert!(refused.to_string().contains("didn't open"), "{refused}");
     }
 
     #[tokio::test]

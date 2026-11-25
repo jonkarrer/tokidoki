@@ -11,7 +11,9 @@
   // `trace`) and followed live while it is still out.
   let reading = $state<string | null>(null);
 
-  const missions = $derived(app.workers.filter((worker) => worker.kind === "mission"));
+  // Learning is listed here too: a worker sent to read something and put it in memory works
+  // the same way, and what it did is traced the same.
+  const missions = $derived(app.workers.filter((worker) => worker.kind === "mission" || worker.kind === "learning"));
   const open = $derived(missions.find((worker) => worker.id === reading) ?? null);
 
   $effect(() => {
@@ -52,6 +54,9 @@
   // The last thing it said, with no tool after, is its report: shown as such, at the end.
   const reported = $derived(open?.status === "done" && steps.at(-1)?.uses.length === 0);
   const taken = $derived(reported ? steps.slice(0, -1) : steps);
+  // The way of doing the job it wrote down when it came back: a memory made in its thread.
+  // Or, for learning, the facts it was sent to bring back.
+  const learned = $derived(app.memories.filter((memory) => memory.source?.thread === reading));
 
   function standing(worker: Worker) {
     switch (worker.status) {
@@ -131,6 +136,12 @@
             <p class="job selectable">{open.task}</p>
           </details>
 
+          {#if open.knew?.length}
+            <p class="knew selectable">
+              Started from what it learned before: {open.knew.join(", ")}.
+            </p>
+          {/if}
+
           <h2>Trace</h2>
           {#if app.traceErrors[open.id]}
             <p class="none failed selectable">Its steps couldn't be read: {app.traceErrors[open.id]}</p>
@@ -192,13 +203,21 @@
             <!-- eslint-disable-next-line svelte/no-at-html-tags (sanitized in render) -->
             <div class="reply selectable" class:failed={open.status !== "done"}>{@html render(open.report)}</div>
           {/if}
+          {#if learned.length}
+            <h2>{open.kind === "learning" ? "What is now in memory" : "What it learned for next time"}</h2>
+            {#each learned as memory (memory.id)}
+              <p class="learned selectable">{memory.text}</p>
+            {/each}
+            <p class="none">Kept in Memory, where you can correct or forget it.</p>
+          {/if}
           <p class="foot selectable">{open.id}</p>
         </article>
       {:else}
         <h1>Missions</h1>
         <p class="lede">
           Real work Tokidoki went away to do for you: writing and publishing a post, going through your recent
-          email, placing an order. It sends a worker on a mission, and every step the worker takes is kept here.
+          email, placing an order. And what you sent it to learn: a site read through and put in memory. It sends a
+          worker, and every step the worker takes is kept here.
         </p>
         {#if missions.length === 0}
           <p class="empty">None yet.</p>
@@ -212,7 +231,9 @@
                     {worker.title || worker.task}
                   </span>
                   <span class="meta" class:failed={worker.status === "failed"}
-                    >{[standing(worker), when(worker.started_at)].join(" · ")}</span
+                    >{[worker.kind === "learning" ? "Learning" : "", standing(worker), when(worker.started_at)]
+                      .filter(Boolean)
+                      .join(" · ")}</span
                   >
                 </button>
               </li>
@@ -316,6 +337,19 @@
   }
   .back:hover {
     color: var(--ink);
+  }
+  .knew {
+    margin: 10px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .learned {
+    margin: 0 0 8px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    font-size: 13.5px;
   }
   .brief {
     margin-top: 10px;

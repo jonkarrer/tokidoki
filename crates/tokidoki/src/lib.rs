@@ -17,6 +17,7 @@
 mod browser_tools;
 mod events;
 mod note_tools;
+mod page;
 mod speech;
 mod worker_tools;
 
@@ -291,6 +292,8 @@ pub struct Parts<M> {
     pub voice: Option<Arc<voice::Voice>>,
     /// The browser a mission drives, where there is one.
     pub browser: Option<browser::Browser>,
+    /// Procedural memory for missions: what was learned doing one is used for the next.
+    pub lessons: Option<Arc<dyn agent::Lessons>>,
 }
 
 /// The running system; cheap to clone.
@@ -389,10 +392,14 @@ impl Tokidoki {
         experience.delegation = experience::Delegation {
             research: exa.is_some(),
             missions: true,
+            learning: true,
         };
         let review = (jev.clone())
             .map(|jev| Arc::new(worker_tools::JevReview(jev)) as Arc<dyn agent::Review>);
         experience.jev = jev;
+        let experience = Arc::new(experience);
+        let lessons: Arc<dyn agent::Lessons> =
+            Arc::new(worker_tools::Procedures(experience.clone()));
         let model = Arc::new(ProviderModel {
             provider: provider(),
             request: answers(),
@@ -400,7 +407,7 @@ impl Tokidoki {
         let parts = Parts {
             store,
             model,
-            mind: Some(Arc::new(experience)),
+            mind: Some(experience),
             router,
             memory,
             scope,
@@ -414,6 +421,7 @@ impl Tokidoki {
             review,
             voice: (config.voice_models.clone()).map(|dir| Arc::new(voice::Voice::new(dir))),
             browser: config.browser.clone().map(browser::Browser::new),
+            lessons: Some(lessons),
         };
         Self::assemble(parts, asleep)
     }
@@ -442,6 +450,16 @@ impl Tokidoki {
                 tools: mission.specs(),
             },
         );
+        // Learning has the mission's tools: what it is sent to read may be anywhere a
+        // mission can go.
+        names.push(worker_tools::LEARNING);
+        kinds.insert(
+            worker_tools::LEARNING.to_string(),
+            ThreadSetup {
+                system: Some(worker_tools::learning_prompt(parts.browser.is_some())),
+                tools: mission.specs(),
+            },
+        );
         if let Some(exa) = &parts.exa {
             let research = worker_tools::research(exa);
             let setup = ThreadSetup {
@@ -453,7 +471,7 @@ impl Tokidoki {
         }
         let mission_tools: Vec<String> = mission.specs().into_iter().map(|t| t.name).collect();
         let late = worker_tools::Late::default();
-        worker_tools::add(&mut tools, &late, &names);
+        worker_tools::add(&mut tools, &late, &names, parts.lessons.clone());
         let system = [
             parts.system.as_deref().unwrap_or_default(),
             note_tools::PROMPT,
@@ -489,7 +507,10 @@ impl Tokidoki {
             parts.mind,
             parts.settings,
             live.clone(),
-            parts.review,
+            agent::WorkerHooks {
+                review: parts.review,
+                lessons: parts.lessons,
+            },
         );
         let engine = Engine::open(parts.store.clone(), registry, engine::Settings::default())?;
         if asleep.is_none() {

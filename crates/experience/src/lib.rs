@@ -25,8 +25,10 @@ use serde_json::{Value, json};
 use state::{Checkpoint, Event, Recalled, Thread};
 
 mod judge;
+mod lessons;
 
 pub use judge::Delegation;
+pub use lessons::brief as procedures_brief;
 pub mod settle;
 pub use settle::RESUME_HANDOFF;
 
@@ -323,7 +325,10 @@ impl<A: Api> Experience<A> {
         let mission = (judged.mission)
             .filter(|p| *p >= judge::MISSION_MIN)
             .map(|p| format!("{MISSION_ADVICE} (Jev: mission, {p:.2})"));
-        let advice = research.or(mission);
+        let learning = (judged.learning)
+            .filter(|p| *p >= judge::LEARNING_MIN)
+            .map(|p| format!("{LEARNING_ADVICE} (Jev: learning, {p:.2})"));
+        let advice = research.or(mission).or(learning);
         Some(Heard {
             recall: judged.recall.into_iter().map(|(item, _)| item).collect(),
             keep,
@@ -1045,6 +1050,13 @@ away and do, many steps with something to show at the end, not something to answ
 a step or two. If a mission worker's tools can do it, send one with `delegate` (kind \
 \"mission\", once), then tell the user in a sentence that you're on it. If they can't, say \
 plainly what you can't do yet. Don't pretend it was done.";
+
+/// What the model is told when Jev judges a message a request to go and learn something.
+const LEARNING_ADVICE: &str = "The user is asking you to go and learn something and remember \
+it. Send a learning worker with `delegate` (kind \"learning\", once), saying what to learn and \
+where they said to look; what it finds is put in memory when it comes back. Then tell the user \
+in a sentence that you're on it. What they told you in this message itself is remembered \
+without that.";
 
 const WRITE_PROMPT: &str = "Write what the user said as one fact for an assistant's long-term \
 memory about them: a standalone third-person statement (\"The user ...\"), in the language the user \

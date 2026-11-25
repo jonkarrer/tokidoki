@@ -31,10 +31,13 @@ const WORK: &str = "work";
 const ANSWER: &str = "answer";
 const RESEARCH: &str = "research";
 const MISSION: &str = "mission";
+const LEARNING: &str = "learning";
 /// A message this likely to be research gets the model advice to hand it on.
 pub(crate) const RESEARCH_MIN: f64 = 0.6;
 /// And one this likely to be a mission.
 pub(crate) const MISSION_MIN: f64 = 0.6;
+/// And one this likely to be something to go and learn.
+pub(crate) const LEARNING_MIN: f64 = 0.6;
 
 /// The kinds of worker there are to hand work to.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -43,11 +46,13 @@ pub struct Delegation {
     pub research: bool,
     /// Carrying out a long job, in many steps with tools.
     pub missions: bool,
+    /// Going to learn something where the user says, to remember it.
+    pub learning: bool,
 }
 
 impl Delegation {
     fn any(self) -> bool {
-        self.research || self.missions
+        self.research || self.missions || self.learning
     }
 }
 
@@ -60,6 +65,8 @@ pub(crate) struct Judged {
     pub research: Option<f64>,
     /// How likely it is a long job to send a worker on a mission for; `None` when not asked.
     pub mission: Option<f64>,
+    /// How likely it asks for something to be learned and remembered; `None` when not asked.
+    pub learning: Option<f64>,
 }
 
 /// Asks Jev about `message`, said after `earlier` (oldest first, as "who: text"); with
@@ -136,6 +143,17 @@ pub(crate) async fn judge(
                 ),
             );
         }
+        if delegation.learning {
+            work.insert(
+                LEARNING.to_string(),
+                json!(
+                    "The user wants Tokidoki to go and learn about something and keep it in \
+                     memory: read a site, a page or a source they name and remember what it \
+                     says (\"learn about my app from its site\", \"study this and commit it \
+                     to memory\"). Building what it knows, not a report to read"
+                ),
+            );
+        }
         questions.insert(
             WORK.to_string(),
             Question::choice("What does `message` ask of Tokidoki?", work),
@@ -150,6 +168,7 @@ pub(crate) async fn judge(
     };
     let research = work(RESEARCH, delegation.research);
     let mission = work(MISSION, delegation.missions);
+    let learning = work(LEARNING, delegation.learning);
     let candidates_weighed = candidates.len();
     let mut recall: Vec<(Item, f64)> = candidates
         .into_iter()
@@ -165,6 +184,7 @@ pub(crate) async fn judge(
         recall = ?recall.iter().map(|(i, p)| (i.id, format!("{p:.2}"), i.body.text())).collect::<Vec<_>>(),
         research,
         mission,
+        learning,
         weighed = candidates_weighed,
         input_tokens = response.usage.input_tokens,
         ms = started.elapsed().as_millis() as u64,
@@ -175,6 +195,7 @@ pub(crate) async fn judge(
         lasting,
         research,
         mission,
+        learning,
     })
 }
 
@@ -433,6 +454,7 @@ mod tests {
         let both = Delegation {
             research: true,
             missions: true,
+            learning: true,
         };
         for (message, work) in [
             (
@@ -460,6 +482,15 @@ mod tests {
                 "Go to example.com and tell me what the page says.",
                 RESEARCH,
             ),
+            (
+                "Go learn about my app Bernt from bernt.app and commit what it does to memory.",
+                LEARNING,
+            ),
+            (
+                "Study headquarters.jokar.dev so you know my projects.",
+                LEARNING,
+            ),
+            ("I run an iOS app called Bernt.", ANSWER),
             ("What's on my grocery list in my notes?", ANSWER),
             ("Write me a haiku about autumn.", ANSWER),
             ("What's 17 times 23?", ANSWER),
@@ -472,6 +503,8 @@ mod tests {
             println!("research {research:.2}, mission {mission:.2}: {message}");
             assert_eq!(research >= RESEARCH_MIN, work == RESEARCH, "{message}");
             assert_eq!(mission >= MISSION_MIN, work == MISSION, "{message}");
+            let learning = judged.learning.unwrap();
+            assert_eq!(learning >= LEARNING_MIN, work == LEARNING, "{message}");
         }
     }
 }

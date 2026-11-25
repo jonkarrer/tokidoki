@@ -50,7 +50,11 @@
     <details class="report" class:failed={line.report.status !== "done"}>
       <summary>
         <span class="what"
-          >{line.report.kind === "mission"
+          >{line.report.kind === "learning"
+            ? line.report.status === "done"
+              ? "Learned, and in memory"
+              : "Couldn't be learned"
+            : line.report.kind === "mission"
             ? line.report.status === "done"
               ? "A mission came back"
               : "A mission couldn't be finished"

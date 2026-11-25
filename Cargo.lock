@@ -5173,6 +5173,7 @@ dependencies = [
  "jev",
  "memory",
  "notes",
+ "reqwest",
  "router",
  "serde_json",
  "state",

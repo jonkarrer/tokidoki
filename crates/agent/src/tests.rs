@@ -1394,7 +1394,10 @@ fn with_workers(script: &Arc<Script>, review: Option<Arc<dyn Review>>) -> Agent 
         None,
         fast(),
         Live::default(),
-        review,
+        WorkerHooks {
+            review,
+            lessons: None,
+        },
     );
     let engine = Engine::open(store(), registry, EngineSettings::default()).unwrap();
     engine.resume();
@@ -1424,19 +1427,17 @@ async fn a_workers_report_is_delivered_while_the_user_is_still_there() {
     let id = agent.submit("t1", input("Find X")).unwrap();
     settled(&agent, &id).await;
 
-    let started = agent
-        .delegate("t1", "call-1", "research", "X", "Find X")
-        .unwrap();
+    let started = agent.delegate("t1", "call-1", research("Find X")).unwrap();
     assert!(is_worker(&started.id));
     assert_eq!(
         agent
-            .delegate("t1", "call-1", "research", "X", "Find X")
+            .delegate("t1", "call-1", research("Find X"))
             .unwrap()
             .id,
         started.id
     );
     let again = agent
-        .delegate("t1", "call-2", "research", "X", "Find X again")
+        .delegate("t1", "call-2", research("Find X again"))
         .unwrap_err();
     assert!(again.to_string().contains("already"), "{again}");
 
@@ -1492,9 +1493,7 @@ async fn a_workers_report_waits_once_the_user_has_moved_on() {
         let id = agent.submit("t2", input("Something else")).unwrap();
         settled(&agent, &id).await;
 
-        let started = agent
-            .delegate("t1", "call-1", "research", "X", "Find X")
-            .unwrap();
+        let started = agent.delegate("t1", "call-1", research("Find X")).unwrap();
         eventually(|| worker(&agent, &started.id).delivery == Some(expected)).await;
         let lines = transcript(&agent, "t1");
         match expected {
@@ -1526,9 +1525,7 @@ async fn a_cancelled_worker_reports_nothing() {
     let agent = with_workers(&script, None);
     let id = agent.submit("t1", input("Find X")).unwrap();
     settled(&agent, &id).await;
-    let started = agent
-        .delegate("t1", "call-1", "research", "X", "Find X")
-        .unwrap();
+    let started = agent.delegate("t1", "call-1", research("Find X")).unwrap();
     eventually(|| script.seen().len() == 2).await;
 
     assert!(agent.cancel_worker(&started.id).unwrap());
@@ -1538,7 +1535,17 @@ async fn a_cancelled_worker_reports_nothing() {
     assert_eq!((stopped.report, stopped.delivery), (None, None));
     assert!(agent.cancel_worker("t1").is_err());
     let again = agent
-        .delegate("t1", "call-2", "research", "X", "Find Y instead")
+        .delegate("t1", "call-2", research("Find Y instead"))
         .unwrap();
     assert_ne!(again.id, started.id);
+}
+
+/// A research job called X, to hand to a worker.
+fn research(task: &str) -> Job<'_> {
+    Job {
+        kind: "research",
+        title: "X",
+        task,
+        known: None,
+    }
 }
