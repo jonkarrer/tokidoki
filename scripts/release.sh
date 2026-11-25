@@ -37,7 +37,10 @@ done
 perl -pi -e 's/^version = "[0-9.]+"/version = "'$version'"/ if $. < 8' app/src-tauri/Cargo.toml
 cargo update -q -p tokidoki-app --offline 2>/dev/null || cargo update -q -p tokidoki-app
 
-git add app/src-tauri/tauri.conf.json app/package.json app/src-tauri/Cargo.toml Cargo.lock
+# The licences of what this release is built from, as of this Cargo.lock; bundled in the app.
+(cd app && bun install --frozen-lockfile >/dev/null) && bun scripts/licenses.js >/dev/null
+
+git add app/src-tauri/tauri.conf.json app/package.json app/src-tauri/Cargo.toml Cargo.lock THIRD_PARTY_LICENSES.md
 git commit -q -m "Release v$version"
 git tag -a "v$version" -m "Tokidoki $version"
 echo "Tagged v$version ($current → $version). Publish it with: just upload"

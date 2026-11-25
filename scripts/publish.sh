@@ -222,7 +222,9 @@ step "publishing $tag to $REPO"
 git push origin HEAD:main $tag
 # A draft first, published once every file is up: installed copies never see a latest.json
 # whose update archive isn't there yet.
-notes="Download **Tokidoki_${version}_universal.dmg**, open it and drag Tokidoki to Applications. Installed copies update themselves."
+notes="Download **Tokidoki_${version}_universal.dmg**, open it and drag Tokidoki to Applications. Installed copies update themselves.
+
+Tokidoki is MIT licensed and provided as is, without warranty of any kind. It runs on your own API keys: what you say is sent to the provider you choose, and their usage is billed to you. See the [README](https://github.com/$REPO#what-to-know-before-using-it) and the [third-party licences](https://github.com/$REPO/blob/$tag/THIRD_PARTY_LICENSES.md)."
 release=$(TAG=$tag NAME="Tokidoki $version" NOTES=$notes bun -e \
   'const e = process.env; console.log(JSON.stringify({ tag_name: e.TAG, name: e.NAME, body: e.NOTES, draft: true }))' |
   github POST /repos/$REPO/releases --data-binary @-) || fail "couldn't create the release (does the token have Contents: read and write on $REPO?); fix it and run just upload-resume"

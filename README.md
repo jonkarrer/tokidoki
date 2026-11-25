@@ -44,6 +44,25 @@ for one. Its data lives in `~/Library/Application Support/com.jokar.tokidoki` (`
 Closing the window leaves it running, so idle conversations still dream; quitting stops it,
 and the next launch resumes whatever was cut off.
 
+## What to know before using it
+
+- **Your words go to the provider you choose.** Messages, and the memories and notes brought
+  into a conversation, are sent to Anthropic, Fireworks or Baseten, whichever you picked.
+  With a Jev key, short excerpts go to TypeSafe for the quick decisions; with an Exa key,
+  research queries go to Exa. Each handles them under its own terms.
+- **Usage is billed to your keys.** Tokidoki works in the background too (remembering,
+  tidying memory, research), and that also calls the models.
+- **Everything else stays on the Mac.** Conversations, memory and notes are files in the
+  data folder above; keys are in the Keychain; voice is heard and spoken locally. The app
+  contacts GitHub to look for updates and, the first time voice is used, to download its
+  models.
+- **It can be wrong.** What it says, remembers or finds on the web may be mistaken or out of
+  date. It is not a source of medical, legal or financial advice.
+- **No warranty.** It is provided as is; see the licence.
+
 ## License
 
-MIT. See `LICENSE`.
+Tokidoki's own code is MIT: see `LICENSE`. The app is built from other open-source work,
+listed with its licences in `THIRD_PARTY_LICENSES.md` (written by `just licenses`, and
+bundled in the app beside `LICENSE`). One of them is not permissive: speaking uses
+espeak-ng, which is GPL-3.0-or-later and is linked into the released app through sherpa-onnx.

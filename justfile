@@ -53,6 +53,11 @@ app-build:
 release version:
     scripts/release.sh {{version}}
 
+# Rewrite THIRD_PARTY_LICENSES.md from what the app is built from (a release does this itself)
+licenses:
+    cd app && bun install --frozen-lockfile
+    bun scripts/licenses.js
+
 # Release: bump (asks patch/minor/major unless given: `just upload minor`), build, sign, notarize, upload
 upload *args:
     scripts/publish.sh {{args}}
