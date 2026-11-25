@@ -61,6 +61,8 @@ export const app = $state({
   workers: [] as Worker[],
   /** A worker's own thread, by its id, while its page is open: every step it took. */
   traces: {} as Record<string, Checkpoint[]>,
+  /** Why a worker's thread couldn't be read, by its id. */
+  traceErrors: {} as Record<string, string>,
   /** Why the last send didn't go through. */
   sendError: null as string | null,
 });
@@ -115,7 +117,14 @@ export async function loadWorkers() {
 
 /** Reads a worker's thread from the start; what it does from now on follows (`receive`). */
 export async function trace(worker: string) {
-  app.traces[worker] = await core.history(worker, 0);
+  try {
+    const read = await core.history(worker, 0);
+    app.traces[worker] = read;
+    delete app.traceErrors[worker];
+  } catch (error) {
+    // Said on the mission's page: an empty trace must never look like "it did nothing".
+    app.traceErrors[worker] = String(error);
+  }
 }
 
 /** Stops a worker: what it was looking into never comes back. */

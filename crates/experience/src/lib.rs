@@ -1039,9 +1039,10 @@ const DELEGATE_ADVICE: &str = "This message looks like research. Hand it to a re
 with `delegate` (once), then tell the user in a sentence that you're on it and will come back \
 with what you find. Don't research it yourself or guess the result.";
 
-/// What the model is told when Jev judges a message a job to go and do.
-const MISSION_ADVICE: &str = "This message looks like a job to go and do, not something to \
-talk through. If a mission worker's tools can do it, send one with `delegate` (kind \
+/// What the model is told when Jev judges a message a mission.
+const MISSION_ADVICE: &str = "This message looks like a mission: a piece of real work to go \
+away and do, many steps with something to show at the end, not something to answer or do in \
+a step or two. If a mission worker's tools can do it, send one with `delegate` (kind \
 \"mission\", once), then tell the user in a sentence that you're on it. If they can't, say \
 plainly what you can't do yet. Don't pretend it was done.";
 

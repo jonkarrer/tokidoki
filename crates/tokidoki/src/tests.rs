@@ -239,7 +239,7 @@ async fn an_input_is_routed_answered_and_followed() {
     let system = first.system.as_deref().unwrap();
     assert!(system.starts_with("Be brief.\n\nNotes are the user's own"));
     let tools: Vec<&str> = first.tools.iter().map(|t| t.name.as_str()).collect();
-    assert!(system.contains("goes to a mission worker"));
+    assert!(system.contains("A mission worker takes a piece of real work"));
     assert!(!system.contains("research worker"), "no Exa, no research");
     assert_eq!(
         tools,

@@ -41,7 +41,7 @@ pub(crate) const MISSION_MIN: f64 = 0.6;
 pub struct Delegation {
     /// Looking something up on the web and writing a report.
     pub research: bool,
-    /// Going and doing a job, step by step with tools.
+    /// Carrying out a long job, in many steps with tools.
     pub missions: bool,
 }
 
@@ -58,7 +58,7 @@ pub(crate) struct Judged {
     pub lasting: f64,
     /// How likely it is work to hand to a research worker; `None` when not asked.
     pub research: Option<f64>,
-    /// How likely it is a job to send a worker on a mission for; `None` when not asked.
+    /// How likely it is a long job to send a worker on a mission for; `None` when not asked.
     pub mission: Option<f64>,
 }
 
@@ -125,9 +125,14 @@ pub(crate) async fn judge(
             work.insert(
                 MISSION.to_string(),
                 json!(
-                    "It is a job to go and do for the user, in several steps: ordering or \
-                     buying something, booking, posting or sending something, filling in a \
-                     form, setting something up. Doing, not finding out or talking"
+                    "It is a piece of real work to go away and do for the user: sustained, \
+                     many steps, with something to show at the end. Making or doing something \
+                     in one of their accounts (writing and publishing a post, placing an \
+                     order, booking), or working through a pile of material there (reading \
+                     their recent emails and summarizing them, checking the health of \
+                     their apps on a hosting service or their own network). It needs their \
+                     own access: what anyone could find on the public web is not this. Not a \
+                     single look-up, and not reading their notes or memory"
                 ),
             );
         }
@@ -448,6 +453,14 @@ mod tests {
                 "Book a table for two at Taberna on Friday at eight.",
                 MISSION,
             ),
+            ("Go make a marketing post on X for my Bernt app.", MISSION),
+            ("Go read my last 10 emails and summarize them.", MISSION),
+            ("Tell me the health of all of my apps on fly.io.", MISSION),
+            (
+                "Go to example.com and tell me what the page says.",
+                RESEARCH,
+            ),
+            ("What's on my grocery list in my notes?", ANSWER),
             ("Write me a haiku about autumn.", ANSWER),
             ("What's 17 times 23?", ANSWER),
             ("Thanks, that's helpful!", ANSWER),

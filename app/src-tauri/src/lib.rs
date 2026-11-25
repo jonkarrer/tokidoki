@@ -140,14 +140,34 @@ fn open(app: &AppHandle) -> anyhow::Result<bool> {
     };
     let mut events = tokidoki.events();
     let awake = key.is_some();
-    *running = Some(Running { tokidoki, awake });
+    *running = Some(Running {
+        tokidoki: tokidoki.clone(),
+        awake,
+    });
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = events.recv().await {
+            if let Event::Worker { worker } = &event
+                && worker.status != tokidoki::interface::WorkerStatus::Running
+            {
+                put_browser_away(&app, &tokidoki);
+            }
             let _ = app.emit("tokidoki:event", event);
         }
     });
     Ok(awake)
+}
+
+/// A worker ended: with no mission still out, the browser's window is put out of the way
+/// (its page and logins stay as they are, for the next one).
+fn put_browser_away(app: &AppHandle, tokidoki: &Tokidoki) {
+    let out = tokidoki.workers(&Speaker::owner()).is_ok_and(|workers| {
+        let running = tokidoki::interface::WorkerStatus::Running;
+        (workers.iter()).any(|worker| worker.kind == "mission" && worker.status == running)
+    });
+    if !out {
+        browser::put_away(app);
+    }
 }
 
 /// Stops the core: running work resumes at the next launch.

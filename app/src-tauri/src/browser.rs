@@ -4,17 +4,19 @@
 //!
 //! The window is made the first time a mission browses, and shown without taking the
 //! keyboard: the user can watch, and can click and type in it themselves (signing in to a
-//! site is done here, once; the session is kept). Closing it hides it. A page in it can't
+//! site is done here, once; the session is kept). Closing it hides it, and it is put away
+//! when the last mission out comes back (`put_away`). A page in it can't
 //! call the app: the app's commands are granted to the `main` window alone
 //! (capabilities/default.json).
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result};
 use browser::{Engine, EngineFuture};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-pub const WINDOW: &str = "browser";
+const WINDOW: &str = "browser";
 
 /// Which saved logins the window uses: a store of its own, named by these bytes (any 16,
 /// kept the same for good). Development builds have another, so trying things out never
@@ -26,6 +28,17 @@ const DEV_STORE: [u8; 16] = *b"tokidoki-dev-web";
 /// name out, and sites that look for one send it a page for unknown browsers, or none.
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
                           (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+
+/// The window was put away because no mission was out (`put_away`).
+static AWAY: AtomicBool = AtomicBool::new(false);
+
+/// Hides the window, if there is one, until a mission next browses.
+pub fn put_away(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        AWAY.store(true, Ordering::Release);
+        let _ = window.hide();
+    }
+}
 
 pub struct Page {
     app: AppHandle,
@@ -44,6 +57,11 @@ impl Page {
     fn window(&self) -> Result<WebviewWindow> {
         let _making = self.making.lock().unwrap();
         if let Some(window) = self.app.get_webview_window(WINDOW) {
+            // Put away when the last mission ended: back for this one. Not when the user
+            // closed it themselves meanwhile: then it stays closed until they ask for it.
+            if AWAY.swap(false, Ordering::AcqRel) {
+                let _ = window.show();
+            }
             return Ok(window);
         }
         let blank = WebviewUrl::External("about:blank".parse()?);

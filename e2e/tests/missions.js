@@ -1,7 +1,8 @@
 // With a model key: a job is handed to a worker on a mission. Tokidoki says it's on it, an
 // "On a mission" line shows while the worker is out, its report comes back as a card, and
-// Missions keeps what came of it with every step the worker took. The job here is one the
-// mission's tools can do (read the user's notes). Calls a model (the cheapest).
+// Missions keeps what came of it with every step the worker took. The job here is not what a
+// mission is for (reading a note is the conversation's own to do): it is asked for outright,
+// as the one job a mission can do with no browser and no key but the model's. Calls a model (the cheapest).
 const invoke = window.__TAURI_INTERNALS__.invoke;
 await t.see(".composer textarea");
 await invoke("write_note", {
@@ -22,12 +23,12 @@ await t.see("section li button");
 await t.check("Missions lists it", document.querySelectorAll("section li button").length === 1);
 await t.shot("missions-3-list");
 await t.click("section li button");
-await t.until("its trace", () => document.querySelector(".trace li.tool"), 10000);
-await t.check("the job is shown", /grocery/i.test(document.querySelector(".job").textContent));
-await t.check("what came of it is shown", /4|four/i.test(document.querySelector("article .reply").textContent));
-await t.check("the trace has the notes being read", /search notes|get note/.test(document.querySelector(".trace").textContent));
+await t.until("its trace", () => document.querySelector(".trace .use"), 10000);
+await t.check("the trace names the tool it used", /search_notes|get_note/.test(document.querySelector(".trace").textContent));
+await t.check("with what it was given", document.querySelector(".trace dl dd")?.textContent.trim().length > 0);
+await t.check("and its report after", /4|four/i.test(document.querySelector("article .reply").textContent));
 await t.shot("missions-4-trace");
-await t.click(".trace li.tool summary");
+await t.click(".trace .result summary");
 await t.sleep(200);
-await t.check("a step opens to what came back", /oat milk|Grocery list/i.test(document.querySelector(".trace pre")?.textContent ?? ""));
+await t.check("a result opens to all that came back", /oat milk|Grocery list/i.test(document.querySelector(".trace pre")?.textContent ?? ""));
 await t.shot("missions-5-step");

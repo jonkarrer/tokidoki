@@ -4,10 +4,13 @@
 //!
 //!   research  finds something out on the web (`web_search`, `read_page`, on Exa) and writes
 //!             a report.
-//!   mission   goes and does a job: an obvious unit of work that isn't talk, research or a
-//!             note ("order my groceries", "post this"). It works step by step with the
-//!             tools a mission has, and everything it did is its thread, which the app shows
-//!             as the mission's trace.
+//!   mission   a piece of real work to go away and do: sustained, many steps, with something
+//!             to show at the end. Making something in one of the user's accounts ("make a
+//!             marketing post on X for my app"), or working through a pile of material
+//!             there ("read my last ten emails and summarize them"). Not what the
+//!             conversation can do in a step or two itself (reading a note), not a single
+//!             look-up, and not research (the public web, searched, written up). Everything
+//!             it did is its thread, which the app shows as the mission's trace.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -47,12 +50,22 @@ pub fn prompt(kinds: &[&str], mission_tools: &[String]) -> String {
     }
     if kinds.contains(&MISSION) {
         text.push_str(&format!(
-            " A job to go and do (not talk, not research, not a note: ordering, booking, \
-             posting, filling something in, anything done in steps) goes to a mission worker, \
-             which has these tools and no others: {}. If the job needs something they can't \
-             do, tell the user what you can't do yet instead of sending one. The browser \
-             tools, when it has them, drive one web browser with the user's saved logins: \
-             send one job that needs it at a time.",
+            " A mission worker takes a piece of real work to go away and do: sustained, many \
+             steps, with something to show at the end. Making or doing something in one of \
+             the user's accounts (\"make a marketing post on X for my app\", \"order my \
+             groceries\"), or working through a pile of material there (\"read my last ten \
+             emails and summarize them\"). Not what you can do yourself in a step or two \
+             (reading or saving a note, answering from what you know), and not research: \
+             what can be found on the public web is research, however it is worded (\"go to \
+             this page and tell me what it says\"). A mission is for what needs the user's \
+             own access: a site they are signed in to, their accounts, their own network \
+             (\"check the health of my apps on fly.io\"). A mission worker has these tools \
+             and no others: {}. Something small that only \
+             those tools can do (looking one thing up on a site the user is signed in to) \
+             also goes to one, since you have no other way. If the job needs something they \
+             can't do, tell the user what you can't do yet instead of sending one. The \
+             browser tools, when it has them, drive one web browser with the user's saved \
+             logins: send one job that needs it at a time.",
             mission_tools.join(", ")
         ));
     }
