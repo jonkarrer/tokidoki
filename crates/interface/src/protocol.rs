@@ -429,7 +429,7 @@ pub struct Worker {
     pub id: String,
     /// The thread that asked for it.
     pub parent: String,
-    /// What kind of worker: `research`.
+    /// What kind of worker: `research` (finds something out) or `mission` (does a job).
     pub kind: String,
     /// A few words naming it.
     pub title: String,

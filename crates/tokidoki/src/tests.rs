@@ -232,13 +232,26 @@ async fn an_input_is_routed_answered_and_followed() {
         2,
         "one per model request"
     );
-    // The model saw the thread's setup: the prompt, with what it says of notes, and the
-    // tools, with the note tools.
+    // The model saw the thread's setup: the prompt, with what it says of notes and workers,
+    // and the tools, with the note tools and the ones that hand work off.
     let first = &script.seen.lock().unwrap()[0];
     let system = first.system.as_deref().unwrap();
     assert!(system.starts_with("Be brief.\n\nNotes are the user's own"));
     let tools: Vec<&str> = first.tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(tools, ["get_note", "save_note", "search_notes", "weather"]);
+    assert!(system.contains("goes to a mission worker"));
+    assert!(!system.contains("research worker"), "no Exa, no research");
+    assert_eq!(
+        tools,
+        [
+            "cancel_worker",
+            "delegate",
+            "get_note",
+            "list_workers",
+            "save_note",
+            "search_notes",
+            "weather"
+        ]
+    );
 
     let threads = tokidoki.threads().unwrap();
     assert_eq!(threads.len(), 1);
@@ -660,7 +673,7 @@ async fn research_goes_to_a_worker_and_comes_back() {
             vec![
                 Reply::Call(
                     "delegate",
-                    json!({ "task": "Find the population of Lisbon." }),
+                    json!({ "task": "Find the population of Lisbon.", "kind": "research" }),
                 ),
                 Reply::Text("I'm on it."),
                 Reply::Text("Lisbon has about 545,000 people."),
@@ -731,6 +744,109 @@ async fn research_goes_to_a_worker_and_comes_back() {
             .iter()
             .all(|e| matches!(e, Event::Checkpoint { thread, .. } if *thread == sent.thread))
     );
+}
+
+/// The conversation's model and a mission's, each with its own script.
+struct Sides {
+    conversation: Script,
+    mission: Script,
+}
+
+impl Model for Sides {
+    async fn chat(&self, ctx: &Context) -> Result<Response> {
+        match ctx.system.as_deref() == Some(worker_tools::MISSION_PROMPT) {
+            true => self.mission.chat(ctx).await,
+            false => self.conversation.chat(ctx).await,
+        }
+    }
+}
+
+/// A job handed to a mission is done on a thread of its own, with the mission's tools and
+/// prompt; every step it took can be read there, and its report comes back.
+#[tokio::test]
+async fn a_mission_is_done_on_its_own_thread_and_can_be_traced() {
+    let (parts, _) = parts(Vec::new(), Sqlite::memory().unwrap());
+    let script = |replies: Vec<Reply>| Script {
+        replies: Mutex::new(replies.into()),
+        ..Script::default()
+    };
+    let model = Arc::new(Sides {
+        conversation: script(vec![
+            Reply::Call(
+                "delegate",
+                json!({ "task": "Order the groceries on my list.", "kind": "mission", "title": "Groceries" }),
+            ),
+            Reply::Text("I'm on it."),
+            Reply::Text("I couldn't order them: there is no list."),
+        ]),
+        mission: script(vec![
+            Reply::Call("search_notes", json!({ "query": "groceries" })),
+            Reply::Text("Not done: there is no grocery list in the notes."),
+        ]),
+    });
+    let parts = Parts {
+        model: model.clone(),
+        exa: None,
+        store: parts.store,
+        mind: parts.mind,
+        router: parts.router,
+        memory: parts.memory,
+        scope: parts.scope,
+        notes: parts.notes,
+        tools: parts.tools,
+        system: parts.system,
+        settings: parts.settings,
+        speakers: parts.speakers,
+        journal: parts.journal,
+        review: parts.review,
+        voice: parts.voice,
+    };
+    let tokidoki = Tokidoki::build(parts).unwrap();
+    let mut events = tokidoki.events();
+    let sent = tokidoki.send(me("Order my groceries.")).await.unwrap();
+    settled(&tokidoki, &sent.submission).await;
+    let delivered = |e: &Event| matches!(e, Event::Worker { worker } if worker.delivery.is_some());
+    let seen = until(&mut events, delivered).await;
+    let Some(Event::Worker { worker }) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(worker.kind, "mission");
+    assert_eq!(worker.title, "Groceries");
+    assert_eq!(worker.status, interface::WorkerStatus::Done);
+    assert!(worker.report.as_deref().unwrap().starts_with("Not done"));
+
+    // The mission ran as itself: its prompt, its tools, nothing to hand work on with.
+    let first = &model.mission.seen.lock().unwrap()[0];
+    let tools: Vec<&str> = first.tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(tools, ["get_note", "search_notes"]);
+
+    // Its thread is the trace: the job, the step it took and what came of it, the report.
+    let trace = tokidoki.history(&worker.id, 0).unwrap();
+    let said: Vec<&Content> = trace
+        .iter()
+        .filter_map(|event| match event {
+            Event::Checkpoint {
+                change: Change::Message { content, .. },
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(matches!(said[0], Content::Text { text } if text == "Order the groceries on my list."));
+    assert!(matches!(said[1], Content::ToolCall { name, .. } if name == "search_notes"));
+    assert!(matches!(
+        said[2],
+        Content::ToolResult {
+            is_error: false,
+            ..
+        }
+    ));
+    assert!(matches!(said[3], Content::Text { text } if text.starts_with("Not done")));
+    // And it stays out of the conversation.
+    let threads = tokidoki.threads().unwrap();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].id, sent.thread);
 }
 
 /// A research question on real models (Anthropic's cheapest, with Jev and Exa: their keys in

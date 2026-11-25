@@ -6,6 +6,7 @@
   import Keys from "./lib/Keys.svelte";
   import Memory from "./lib/Memory.svelte";
   import Notes from "./lib/Notes.svelte";
+  import Missions from "./lib/Missions.svelte";
   import Research from "./lib/Research.svelte";
   import Presence from "./lib/Presence.svelte";
   import Threads from "./lib/Threads.svelte";
@@ -36,6 +37,9 @@
 
   // Research: whether a worker is looking into something now, and how many reports there are.
   const looking = $derived(app.workers.some((w) => w.kind === "research" && w.status === "running"));
+  // Missions: whether a worker is out on one now, and how many there have been.
+  const out = $derived(app.workers.some((w) => w.kind === "mission" && w.status === "running"));
+  const missions = $derived(app.workers.filter((w) => w.kind === "mission").length);
   const researched = $derived(app.workers.filter((w) => w.kind === "research" && w.status === "done").length);
 
   // What Tokidoki is doing in the conversation, shown beside it from anywhere in the app.
@@ -86,6 +90,13 @@
         <span>Research</span>
         <span class="count">{researched || ""}</span>
       </button>
+      <button class="place missions" class:on={app.view === "missions"} onclick={() => show("missions")}>
+        <span class="mark">
+          {#if out}<Presence doing={{ kind: "tool", name: "mission" }} size={12} />{:else}<span class="flag"></span>{/if}
+        </span>
+        <span>Missions</span>
+        <span class="count">{missions || ""}</span>
+      </button>
       <footer>
         <UpdateCard />
         <div class="foot">
@@ -108,6 +119,8 @@
         <Memory />
       {:else if app.view === "notes"}
         <Notes />
+      {:else if app.view === "missions"}
+        <Missions />
       {:else if app.view === "research"}
         <Research />
       {:else if app.view === "threads"}
@@ -225,6 +238,14 @@
     height: 1.5px;
     background: var(--indigo);
     transform: rotate(45deg);
+  }
+  /* A mission: a flag on its pole, small. */
+  .flag {
+    width: 8px;
+    height: 10px;
+    border-left: 1.5px solid var(--indigo);
+    background: linear-gradient(var(--indigo), var(--indigo)) top right / 6px 5px no-repeat;
+    border-radius: 0 1px 1px 0;
   }
   .count {
     color: var(--muted);

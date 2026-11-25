@@ -50,7 +50,13 @@
     <details class="report" class:failed={line.report.status !== "done"}>
       <summary>
         <span class="what"
-          >{line.report.status === "done" ? "Research came back" : "Research couldn't be done"}{#if held}{" · kept for when you come back to it"}{/if}</span
+          >{line.report.kind === "mission"
+            ? line.report.status === "done"
+              ? "A mission came back"
+              : "A mission couldn't be finished"
+            : line.report.status === "done"
+              ? "Research came back"
+              : "Research couldn't be done"}{#if held}{" · kept for when you come back to it"}{/if}</span
         >
         <span class="task">{worker?.title || line.report.task}</span>
       </summary>

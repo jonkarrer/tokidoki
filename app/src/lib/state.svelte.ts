@@ -29,7 +29,14 @@ const PAGE = 40;
 export const app = $state({
   status: null as Status | null,
   /** What the main area shows. */
-  view: "conversation" as "conversation" | "memory" | "notes" | "research" | "threads" | "keys",
+  view: "conversation" as
+    | "conversation"
+    | "memory"
+    | "notes"
+    | "research"
+    | "missions"
+    | "threads"
+    | "keys",
   /** The threads under the conversation, most recently active first. */
   threads: [] as ThreadSummary[],
   /** The thread the Threads view shows. */
@@ -52,6 +59,8 @@ export const app = $state({
   unanswered: null as string | null,
   /** Work handed to workers, latest first: running, or come back. */
   workers: [] as Worker[],
+  /** A worker's own thread, by its id, while its page is open: every step it took. */
+  traces: {} as Record<string, Checkpoint[]>,
   /** Why the last send didn't go through. */
   sendError: null as string | null,
 });
@@ -75,13 +84,21 @@ export async function start() {
   app.status = await core.status();
   // Without a key it is asleep, and what it has can still be read.
   if (app.status.state !== "failed")
-    await Promise.all([loadThreads(), loadMemories(), loadNotes(), loadConversation(), loadWorkers()]);
+    await Promise.all([
+      loadThreads(),
+      loadMemories(),
+      loadNotes(),
+      loadConversation(),
+      loadWorkers(),
+    ]);
   if (app.status.state === "needs_keys") app.view = "keys";
 }
 
 /** Whether there is anything to show yet: conversations, memories or notes from before. */
 export function hasHistory() {
-  return app.threads.length > 0 || app.memories.length > 0 || app.notes.length > 0;
+  return (
+    app.threads.length > 0 || app.memories.length > 0 || app.notes.length > 0
+  );
 }
 
 export async function loadMemories() {
@@ -94,6 +111,11 @@ export async function loadNotes() {
 
 export async function loadWorkers() {
   app.workers = await core.workers();
+}
+
+/** Reads a worker's thread from the start; what it does from now on follows (`receive`). */
+export async function trace(worker: string) {
+  app.traces[worker] = await core.history(worker, 0);
 }
 
 /** Stops a worker: what it was looking into never comes back. */
@@ -122,7 +144,11 @@ async function loadConversation() {
   app.log = log;
   app.earlier = turns(log) === PAGE;
   seen = {};
-  for (const checkpoint of log) seen[checkpoint.thread] = Math.max(seen[checkpoint.thread] ?? -1, checkpoint.seq);
+  for (const checkpoint of log)
+    seen[checkpoint.thread] = Math.max(
+      seen[checkpoint.thread] ?? -1,
+      checkpoint.seq,
+    );
   // A checkpoint that arrived while that was read went to the log it replaced, and no later
   // one may come to show the gap: ask each thread for what follows.
   await Promise.all(Object.keys(seen).map(catchUp));
@@ -130,7 +156,9 @@ async function loadConversation() {
 
 /** The turns before the ones shown. */
 export async function loadEarlier() {
-  const first = app.log.find((checkpoint) => checkpoint.change.kind === "turn_started");
+  const first = app.log.find(
+    (checkpoint) => checkpoint.change.kind === "turn_started",
+  );
   if (!first) return;
   const older = await core.timeline(first.at, PAGE);
   app.earlier = turns(older) === PAGE;
@@ -138,13 +166,21 @@ export async function loadEarlier() {
 }
 
 function turns(log: Checkpoint[]) {
-  return log.filter((checkpoint) => checkpoint.change.kind === "turn_started").length;
+  return log.filter((checkpoint) => checkpoint.change.kind === "turn_started")
+    .length;
 }
 
 /** Takes a thread's checkpoint if it is the next one; after a gap, reads what was missed. */
 function receive(checkpoint: Checkpoint) {
   // A worker's own thread isn't the conversation: only its report comes back to it.
-  if (checkpoint.thread.startsWith("worker-")) return;
+  if (checkpoint.thread.startsWith("worker-")) {
+    // Its page, when open, shows each step as it is taken.
+    const steps = app.traces[checkpoint.thread];
+    const next = (steps?.at(-1)?.seq ?? -1) + 1;
+    if (steps && checkpoint.seq === next) steps.push(checkpoint);
+    else if (steps && checkpoint.seq > next) trace(checkpoint.thread);
+    return;
+  }
   const last = seen[checkpoint.thread];
   // A thread not shown yet starts here: what it said before is earlier than the conversation.
   if (last === undefined || checkpoint.seq === last + 1) {
@@ -156,7 +192,8 @@ function receive(checkpoint: Checkpoint) {
 async function catchUp(thread: string) {
   const more = await core.history(thread, (seen[thread] ?? -1) + 1);
   // Events kept arriving meanwhile: take only what still comes next.
-  for (const checkpoint of more) if (checkpoint.seq === (seen[thread] ?? -1) + 1) receive(checkpoint);
+  for (const checkpoint of more)
+    if (checkpoint.seq === (seen[thread] ?? -1) + 1) receive(checkpoint);
 }
 
 /** Sends a message; the core files it with the thread it belongs to. */
@@ -187,8 +224,12 @@ function onEvent(event: CoreEvent) {
       const { thread, change } = event;
       if (change.kind === "message" && change.role === "assistant") {
         live(thread).text = "";
-        const text = change.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n\n").trim();
-        if (text && !thread.startsWith("worker-")) replied?.(`${thread}:${event.seq}`, text);
+        const text = change.content
+          .flatMap((part) => (part.type === "text" ? [part.text] : []))
+          .join("\n\n")
+          .trim();
+        if (text && !thread.startsWith("worker-"))
+          replied?.(`${thread}:${event.seq}`, text);
       }
       if (change.kind === "turn_ended") {
         app.live[thread] = { doing: null, text: "" };
@@ -228,7 +269,10 @@ function onEvent(event: CoreEvent) {
       break;
     case "worker": {
       const { worker } = event;
-      app.workers = [worker, ...app.workers.filter((w) => w.id !== worker.id)].sort((a, b) => b.started_at - a.started_at);
+      app.workers = [
+        worker,
+        ...app.workers.filter((w) => w.id !== worker.id),
+      ].sort((a, b) => b.started_at - a.started_at);
       break;
     }
     case "note":
@@ -249,8 +293,14 @@ function onMemory(change: MemoryChange) {
   switch (change.kind) {
     case "learned":
     case "revised": {
-      const gone = change.kind === "revised" ? change.replaces : change.memory.id;
-      app.memories = [change.memory, ...app.memories.filter((m) => m.id !== gone && m.id !== change.memory.id)];
+      const gone =
+        change.kind === "revised" ? change.replaces : change.memory.id;
+      app.memories = [
+        change.memory,
+        ...app.memories.filter(
+          (m) => m.id !== gone && m.id !== change.memory.id,
+        ),
+      ];
       if (app.view !== "memory") app.unseen += 1;
       break;
     }
@@ -267,7 +317,9 @@ function onMemory(change: MemoryChange) {
 
 /** Keeps the list in step with the store: each note once, most recently changed first. */
 function onNote(change: NoteChange) {
-  const others = app.notes.filter((n) => n.id !== (change.kind === "saved" ? change.note.id : change.id));
+  const others = app.notes.filter(
+    (n) => n.id !== (change.kind === "saved" ? change.note.id : change.id),
+  );
   app.notes = change.kind === "saved" ? [change.note, ...others] : others;
 }
 
@@ -286,7 +338,13 @@ export type Item = { key: string; thread: string } & (
 );
 
 /** A worker's report, as its thread was given it. */
-export type Report = { worker: string; kind: string; status: string; task: string; body: string };
+export type Report = {
+  worker: string;
+  kind: string;
+  status: string;
+  task: string;
+  body: string;
+};
 
 /** The report a message holds, if it is one. */
 export function report(text: string): Report | null {
@@ -317,11 +375,23 @@ export function items(log: Checkpoint[], learned: Memory[]): Item[] {
       if (came) {
         out.push({ kind: "report", key, thread, report: came });
       } else if (text && change.role === "user") {
-        out.push({ kind: "user", key, thread, text, moved: last !== null && last !== thread });
+        out.push({
+          kind: "user",
+          key,
+          thread,
+          text,
+          moved: last !== null && last !== thread,
+        });
         last = thread;
       } else if (text) out.push({ kind: "reply", key, thread, text });
       for (const part of change.content)
-        if (part.type === "tool_call") out.push({ kind: "tool", key: `${key}-${part.id}`, thread, name: part.name });
+        if (part.type === "tool_call")
+          out.push({
+            kind: "tool",
+            key: `${key}-${part.id}`,
+            thread,
+            name: part.name,
+          });
     }
     for (const memory of learned)
       if (memory.source?.thread === thread && memory.source.seq === n)

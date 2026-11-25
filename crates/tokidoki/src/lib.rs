@@ -375,10 +375,13 @@ impl Tokidoki {
                 write: scope.clone(),
             },
         );
-        // With an Exa key there are research workers: Jev also judges what to hand them, and
-        // whether a report is worth interrupting the user for.
+        // There are always missions, and with an Exa key research workers too: Jev also
+        // judges what to hand them, and whether a report is worth interrupting the user for.
         let exa = config.exa_key.as_ref().map(exa::Exa::new);
-        experience.delegation = exa.is_some();
+        experience.delegation = experience::Delegation {
+            research: exa.is_some(),
+            missions: true,
+        };
         let review = (jev.clone())
             .map(|jev| Arc::new(worker_tools::JevReview(jev)) as Arc<dyn agent::Review>);
         experience.jev = jev;
@@ -414,25 +417,21 @@ impl Tokidoki {
     fn assemble<M: Model>(parts: Parts<M>, asleep: Option<String>) -> Result<Self> {
         // The engine keeps the span it is opened in, for everything it runs.
         let _recorded = span_of(&parts.journal).entered();
-        // Every thread can keep the user's notes, and is told when to; and, with Exa, hand
-        // research to workers.
+        // Every thread can keep the user's notes, and is told when to, and can hand work to
+        // workers: a mission always, research with Exa.
         let mut tools = parts.tools;
         note_tools::add(&mut tools, &parts.notes);
-        let mut system = match parts.system {
-            Some(system) => format!("{system}\n\n{}", note_tools::PROMPT),
-            None => note_tools::PROMPT.to_string(),
-        };
-        let late = worker_tools::Late::default();
-        if parts.exa.is_some() {
-            worker_tools::add(&mut tools, &late);
-            system = format!("{system}\n\n{}", worker_tools::PROMPT);
-        }
-        let setup = ThreadSetup {
-            system: Some(system),
-            tools: tools.specs(),
-        };
-        // A research worker searches with its own tools, which the conversation doesn't have.
+        // A worker has its own tools, which the conversation doesn't.
+        let mission = worker_tools::mission(&parts.notes, parts.exa.as_ref());
         let mut kinds = std::collections::HashMap::new();
+        let mut names = vec![worker_tools::MISSION];
+        kinds.insert(
+            worker_tools::MISSION.to_string(),
+            ThreadSetup {
+                system: Some(worker_tools::MISSION_PROMPT.into()),
+                tools: mission.specs(),
+            },
+        );
         if let Some(exa) = &parts.exa {
             let research = worker_tools::research(exa);
             let setup = ThreadSetup {
@@ -440,8 +439,27 @@ impl Tokidoki {
                 tools: research.specs(),
             };
             kinds.insert(worker_tools::RESEARCH.to_string(), setup);
-            tools.extend(research);
+            names.insert(0, worker_tools::RESEARCH);
         }
+        let mission_tools: Vec<String> = mission.specs().into_iter().map(|t| t.name).collect();
+        let late = worker_tools::Late::default();
+        worker_tools::add(&mut tools, &late, &names);
+        let system = [
+            parts.system.as_deref().unwrap_or_default(),
+            note_tools::PROMPT,
+            &worker_tools::prompt(&names, &mission_tools),
+        ]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+        let setup = ThreadSetup {
+            system: Some(system),
+            tools: tools.specs(),
+        };
+        // The workers' tools run like any other; a thread only sees the ones it was given.
+        tools.extend(mission);
         let live = Live::default();
         // Whatever changes memory (answering, dreaming, the user) or a note is shown as it
         // happens.

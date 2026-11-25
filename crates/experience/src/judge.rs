@@ -30,8 +30,26 @@ const LASTING: &str = "lasting";
 const WORK: &str = "work";
 const ANSWER: &str = "answer";
 const RESEARCH: &str = "research";
+const MISSION: &str = "mission";
 /// A message this likely to be research gets the model advice to hand it on.
 pub(crate) const RESEARCH_MIN: f64 = 0.6;
+/// And one this likely to be a mission.
+pub(crate) const MISSION_MIN: f64 = 0.6;
+
+/// The kinds of worker there are to hand work to.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Delegation {
+    /// Looking something up on the web and writing a report.
+    pub research: bool,
+    /// Going and doing a job, step by step with tools.
+    pub missions: bool,
+}
+
+impl Delegation {
+    fn any(self) -> bool {
+        self.research || self.missions
+    }
+}
 
 pub(crate) struct Judged {
     /// The candidates likely to help, likeliest first, with how likely.
@@ -40,16 +58,18 @@ pub(crate) struct Judged {
     pub lasting: f64,
     /// How likely it is work to hand to a research worker; `None` when not asked.
     pub research: Option<f64>,
+    /// How likely it is a job to send a worker on a mission for; `None` when not asked.
+    pub mission: Option<f64>,
 }
 
 /// Asks Jev about `message`, said after `earlier` (oldest first, as "who: text"); with
-/// `delegation` (there are workers to hand work to), also whether it is research.
+/// `delegation` (the workers there are to hand work to), also whether it is work for one.
 pub(crate) async fn judge(
     jev: &Jev,
     message: &str,
     earlier: &[String],
     candidates: Vec<Item>,
-    delegation: bool,
+    delegation: Delegation,
 ) -> Result<Judged> {
     let started = std::time::Instant::now();
     let earlier: Vec<String> = earlier
@@ -83,7 +103,7 @@ pub(crate) async fn judge(
             ),
         );
     }
-    if delegation {
+    if delegation.any() {
         let mut work = BTreeMap::new();
         work.insert(
             ANSWER.to_string(),
@@ -92,13 +112,25 @@ pub(crate) async fn judge(
                    advice, writing, explaining, or a quick fact"
             ),
         );
-        work.insert(
-            RESEARCH.to_string(),
-            json!(
-                "It needs looking into: finding current information on the web, comparing \
-                   options, checking several sources, or a written report"
-            ),
-        );
+        if delegation.research {
+            work.insert(
+                RESEARCH.to_string(),
+                json!(
+                    "It needs looking into: finding current information on the web, comparing \
+                     options, checking several sources, or a written report"
+                ),
+            );
+        }
+        if delegation.missions {
+            work.insert(
+                MISSION.to_string(),
+                json!(
+                    "It is a job to go and do for the user, in several steps: ordering or \
+                     buying something, booking, posting or sending something, filling in a \
+                     form, setting something up. Doing, not finding out or talking"
+                ),
+            );
+        }
         questions.insert(
             WORK.to_string(),
             Question::choice("What does `message` ask of Tokidoki?", work),
@@ -106,8 +138,13 @@ pub(crate) async fn judge(
     }
     let response = jev.ask(state, questions).await?;
     let lasting = response.noul(LASTING).unwrap_or(0.0);
-    let research = (response.choice(WORK))
-        .map(|work| work.probabilities.get(RESEARCH).copied().unwrap_or(0.0));
+    let work = |kind: &str, asked: bool| {
+        (response.choice(WORK))
+            .filter(|_| asked)
+            .map(|work| work.probabilities.get(kind).copied().unwrap_or(0.0))
+    };
+    let research = work(RESEARCH, delegation.research);
+    let mission = work(MISSION, delegation.missions);
     let candidates_weighed = candidates.len();
     let mut recall: Vec<(Item, f64)> = candidates
         .into_iter()
@@ -122,6 +159,7 @@ pub(crate) async fn judge(
         lasting,
         recall = ?recall.iter().map(|(i, p)| (i.id, format!("{p:.2}"), i.body.text())).collect::<Vec<_>>(),
         research,
+        mission,
         weighed = candidates_weighed,
         input_tokens = response.usage.input_tokens,
         ms = started.elapsed().as_millis() as u64,
@@ -131,6 +169,7 @@ pub(crate) async fn judge(
         recall,
         lasting,
         research,
+        mission,
     })
 }
 
@@ -380,30 +419,46 @@ mod tests {
         }
     }
 
-    /// How Jev tells research from what Tokidoki can answer itself (`TYPESAFE_API_KEY`).
+    /// How Jev tells research and a mission from what Tokidoki can answer itself, with both
+    /// kinds of worker to hand work to (`TYPESAFE_API_KEY`).
     #[tokio::test]
     #[ignore = "calls Jev"]
-    async fn jev_tells_research_from_an_answer() {
+    async fn jev_tells_research_and_a_mission_from_an_answer() {
         let jev = Jev::new(std::env::var("TYPESAFE_API_KEY").expect("set TYPESAFE_API_KEY"));
-        for (message, research) in [
+        let both = Delegation {
+            research: true,
+            missions: true,
+        };
+        for (message, work) in [
             (
                 "Could you look into the current population of Lisbon, with a source?",
-                true,
+                RESEARCH,
             ),
-            ("Compare the best e-bikes under 2000 euros this year.", true),
+            (
+                "Compare the best e-bikes under 2000 euros this year.",
+                RESEARCH,
+            ),
             (
                 "What flights go from Lisbon to Kyoto in April, and roughly what do they cost?",
-                true,
+                RESEARCH,
             ),
-            ("Write me a haiku about autumn.", false),
-            ("What's 17 times 23?", false),
-            ("Thanks, that's helpful!", false),
-            ("How do I reverse a list in Python?", false),
+            ("Go order my usual groceries.", MISSION),
+            ("Post this on X: shipping Tokidoki 0.2 today.", MISSION),
+            (
+                "Book a table for two at Taberna on Friday at eight.",
+                MISSION,
+            ),
+            ("Write me a haiku about autumn.", ANSWER),
+            ("What's 17 times 23?", ANSWER),
+            ("Thanks, that's helpful!", ANSWER),
+            ("How do I reverse a list in Python?", ANSWER),
+            ("What should I post on X about the release?", ANSWER),
         ] {
-            let judged = judge(&jev, message, &[], Vec::new(), true).await.unwrap();
-            let p = judged.research.unwrap();
-            println!("research {p:.2}: {message}");
-            assert_eq!(p >= RESEARCH_MIN, research, "{message}");
+            let judged = judge(&jev, message, &[], Vec::new(), both).await.unwrap();
+            let (research, mission) = (judged.research.unwrap(), judged.mission.unwrap());
+            println!("research {research:.2}, mission {mission:.2}: {message}");
+            assert_eq!(research >= RESEARCH_MIN, work == RESEARCH, "{message}");
+            assert_eq!(mission >= MISSION_MIN, work == MISSION, "{message}");
         }
     }
 }

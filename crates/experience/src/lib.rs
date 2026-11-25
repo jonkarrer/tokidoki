@@ -25,6 +25,8 @@ use serde_json::{Value, json};
 use state::{Checkpoint, Event, Recalled, Thread};
 
 mod judge;
+
+pub use judge::Delegation;
 pub mod settle;
 pub use settle::RESUME_HANDOFF;
 
@@ -145,9 +147,9 @@ pub struct Experience<A> {
     /// The newest memory Jev has screened for overlaps (`refine`): pairs of older ones aren't
     /// asked about again. Kept in memory: after a restart the first dream screens them all.
     screened: std::sync::Mutex<i64>,
-    /// Whether there are workers to hand work to (a `delegate` tool): then Jev also judges
-    /// whether a message is research, and the model is advised to hand it on.
-    pub delegation: bool,
+    /// The workers there are to hand work to (a `delegate` tool): then Jev also judges
+    /// whether a message is work for one, and the model is advised to hand it on.
+    pub delegation: Delegation,
 }
 
 impl<A: Api> Experience<A> {
@@ -169,7 +171,7 @@ impl<A: Api> Experience<A> {
             keep_recent_messages: 10,
             jev: None,
             screened: std::sync::Mutex::new(0),
-            delegation: false,
+            delegation: Delegation::default(),
         }
     }
 
@@ -315,9 +317,13 @@ impl<A: Api> Experience<A> {
             spans: Vec::new(),
             reason: format!("tells something lasting ({:.2})", judged.lasting),
         });
-        let advice = (judged.research)
+        let research = (judged.research)
             .filter(|p| *p >= judge::RESEARCH_MIN)
             .map(|p| format!("{DELEGATE_ADVICE} (Jev: research, {p:.2})"));
+        let mission = (judged.mission)
+            .filter(|p| *p >= judge::MISSION_MIN)
+            .map(|p| format!("{MISSION_ADVICE} (Jev: mission, {p:.2})"));
+        let advice = research.or(mission);
         Some(Heard {
             recall: judged.recall.into_iter().map(|(item, _)| item).collect(),
             keep,
@@ -1032,6 +1038,12 @@ for facts that are settings. When unsure, ignore."#;
 const DELEGATE_ADVICE: &str = "This message looks like research. Hand it to a research worker \
 with `delegate` (once), then tell the user in a sentence that you're on it and will come back \
 with what you find. Don't research it yourself or guess the result.";
+
+/// What the model is told when Jev judges a message a job to go and do.
+const MISSION_ADVICE: &str = "This message looks like a job to go and do, not something to \
+talk through. If a mission worker's tools can do it, send one with `delegate` (kind \
+\"mission\", once), then tell the user in a sentence that you're on it. If they can't, say \
+plainly what you can't do yet. Don't pretend it was done.";
 
 const WRITE_PROMPT: &str = "Write what the user said as one fact for an assistant's long-term \
 memory about them: a standalone third-person statement (\"The user ...\"), in the language the user \

@@ -26,6 +26,16 @@ pub fn add(tools: &mut Tools, notes: &Arc<Notes>) {
         .add(GetNote(notes.clone()));
 }
 
+/// The tools that read notes and never write one: for a worker that may need what the user
+/// wrote down (a shopping list, an address) to do its job.
+pub fn reading(notes: &Arc<Notes>) -> Tools {
+    let mut tools = Tools::new();
+    tools
+        .add(SearchNotes(notes.clone()))
+        .add(GetNote(notes.clone()));
+    tools
+}
+
 /// How much of a note's body a search shows; `get_note` has the rest.
 const SEARCH_BODY_CHARS: usize = 1_200;
 

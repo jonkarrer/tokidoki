@@ -191,7 +191,7 @@ id: string,
  */
 parent: string, 
 /**
- * What kind of worker: `research`.
+ * What kind of worker: `research` (finds something out) or `mission` (does a job).
  */
 kind: string, 
 /**
