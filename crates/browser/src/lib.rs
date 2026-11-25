@@ -175,6 +175,15 @@ pub fn host(url: &str) -> Option<&str> {
     (!host.is_empty()).then_some(host)
 }
 
+/// A moment for an editor to catch up with what was just done to it.
+const EDITOR: Duration = Duration::from_millis(120);
+
+/// Text with its spaces and line breaks taken out: an editor may lay the same words out
+/// differently.
+fn squeezed(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// How long a page may take to load.
 const LOAD: Duration = Duration::from_secs(20);
 /// After it has loaded, how long it may keep changing before it is read anyway.
@@ -274,7 +283,32 @@ impl Browser {
     /// Replaces what the field holds with `text`; `submit` presses Enter after.
     pub async fn type_into(&self, number: u32, text: &str, submit: bool) -> Result<Snapshot> {
         let mut last = self.last.lock().await;
-        self.act(&last, number, "type", text, submit).await?;
+        let typed = self.act(&last, number, "type", text, submit).await?;
+        // An editor run by the page's own code: its text was only selected. It is replaced
+        // in steps, each given a moment to reach the editor (`act.js`).
+        if typed["editable"] == true {
+            tokio::time::sleep(EDITOR).await;
+            self.act(&last, number, "clear", "", false).await?;
+            tokio::time::sleep(EDITOR).await;
+            self.act(&last, number, "insert", text, submit).await?;
+        }
+        // What the field holds now is checked against what was meant, so text that went in
+        // wrong is said, not typed again on top. (After Enter, the field may be gone.)
+        if !submit {
+            tokio::time::sleep(EDITOR).await;
+            let holds = self.act(&last, number, "holds", "", false).await?;
+            if let Some(holds) = holds["holds"].as_str()
+                && squeezed(holds) != squeezed(text)
+            {
+                let holds: String = holds.chars().take(400).collect();
+                bail!(
+                    "the field didn't take the text as typed. It now holds: “{}”. Don't type \
+                     on top of it: read the page, and type the whole text again only if that \
+                     will replace it.",
+                    holds.trim()
+                );
+            }
+        }
         self.read_into(&mut last, None).await
     }
 
@@ -292,7 +326,7 @@ impl Browser {
         action: &str,
         text: &str,
         submit: bool,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         let known =
             (last.as_ref()).is_some_and(|page| page.elements.iter().any(|e| e.number == number));
         if !known {
@@ -312,7 +346,7 @@ impl Browser {
         if let Some(error) = done.get("error").and_then(Value::as_str) {
             bail!("{error}");
         }
-        Ok(())
+        Ok(done)
     }
 
     /// Waits for the page to load and go quiet, then reads it. `expect` is the address being
@@ -504,6 +538,41 @@ mod tests {
         assert!(
             act.contains(r#"const REF = 1, ACTION = "type", TEXT = "say \"hi\"", SUBMIT = true;"#)
         );
+    }
+
+    #[tokio::test]
+    async fn an_editor_is_cleared_before_its_text_and_checked_after() {
+        let (browser, fake) = browser();
+        browser.open("https://shop.example").await.unwrap();
+        // The page says the field is an editor, then that it holds something else.
+        *fake.acts.lock().unwrap() = r#"{"editable":true,"holds":"Hello Hello world"}"#.into();
+        let wrong = browser
+            .type_into(1, "Hello world", false)
+            .await
+            .unwrap_err();
+        assert!(
+            wrong
+                .to_string()
+                .contains("It now holds: “Hello Hello world”"),
+            "{wrong}"
+        );
+        let steps: Vec<String> = (fake.ran.lock().unwrap().iter())
+            .filter(|script| script.contains("const REF"))
+            .filter_map(|script| {
+                Some(
+                    script
+                        .split("ACTION = \"")
+                        .nth(1)?
+                        .split('"')
+                        .next()?
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(steps, ["type", "clear", "insert", "holds"]);
+        // Laid out differently, the same words are the text as typed.
+        *fake.acts.lock().unwrap() = r#"{"editable":true,"holds":"Hello\nworld\n"}"#.into();
+        assert!(browser.type_into(1, "Hello world", false).await.is_ok());
     }
 
     #[tokio::test]

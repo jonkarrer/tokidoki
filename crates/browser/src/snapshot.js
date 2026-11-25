@@ -32,7 +32,7 @@
         el.getAttribute("aria-label") ||
           (el.getAttribute("aria-labelledby") && byIds(el.getAttribute("aria-labelledby"))) ||
           (tag === "input" && ["submit", "button"].includes(type) ? el.value : "") ||
-          (tag !== "input" && tag !== "textarea" && tag !== "select" ? el.innerText : "") ||
+          (tag !== "input" && tag !== "textarea" && tag !== "select" && !el.isContentEditable ? el.innerText : "") ||
           (label && label.textContent) ||
           el.getAttribute("placeholder") ||
           el.getAttribute("title") ||
@@ -59,6 +59,9 @@
       // What is typed in a sensitive field never leaves the page.
       const field = role === "textbox" || role === "select" || role === "combobox" || role === "searchbox";
       if (field && el.value && !item.sensitive) item.value = String(el.value).slice(0, 100);
+      // An editor holds its text as its content, not as a value: shown too, so what was
+      // typed into a post box can be seen without typing it again.
+      else if (role === "textbox" && el.isContentEditable && clean(el.innerText)) item.value = clean(el.innerText).slice(0, 300);
       if (tag === "a" && el.href) item.href = el.href;
       if (el.disabled || el.getAttribute("aria-disabled") === "true") item.disabled = true;
       elements.push(item);

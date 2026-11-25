@@ -1,6 +1,13 @@
 // Runs in the page: acts on the element numbered `REF` by the last snapshot, as a person
 // would. `ACTION` is "click" or "type"; `TEXT` and `SUBMIT` go with "type". The three are
 // filled in by the caller as JSON.
+//
+// An editor (a post box, a comment box: a `contenteditable` run by the page's own code) is
+// typed into in steps, with a moment between them for the editor to catch up: "type" only
+// selects what it holds and answers `editable`; then "clear" deletes that, and "insert" puts
+// the text in. Done in one go, the editor hasn't yet heard of the selection when the text
+// arrives, and adds it to what was there instead of replacing it. "holds" answers with what
+// a field holds now, to check the text went in as meant.
 (() => {
   try {
     const el = document.querySelector('[data-tk-ref="' + REF + '"]');
@@ -25,9 +32,22 @@
       return JSON.stringify({ ok: true });
     }
 
-    if (typeof el.focus === "function") el.focus();
     const tag = el.tagName;
-    if (tag === "SELECT") {
+    if (ACTION === "holds") {
+      const holds = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ? el.value : el.innerText;
+      return JSON.stringify({ holds: String(holds || "") });
+    }
+    if (ACTION === "clear") {
+      document.execCommand("delete");
+      return JSON.stringify({ ok: true });
+    }
+    if (ACTION === "insert") {
+      // Deprecated, and still the one way an editor takes text as if it were typed.
+      if (!document.execCommand("insertText", false, TEXT)) el.textContent = TEXT;
+    } else if (typeof el.focus === "function") el.focus();
+    if (ACTION === "insert") {
+      // Typed above; Enter, if asked for, below.
+    } else if (tag === "SELECT") {
       const want = TEXT.trim().toLowerCase();
       const option = [...el.options].find((o) => o.value.toLowerCase() === want || o.text.trim().toLowerCase() === want);
       if (!option) return JSON.stringify({ error: "no option called " + TEXT + "; the options are: " + [...el.options].map((o) => o.text.trim()).join(", ") });
@@ -41,11 +61,8 @@
       el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: TEXT }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     } else if (el.isContentEditable) {
-      const selection = getSelection();
-      selection.selectAllChildren(el);
-      // Deprecated, and still the one way an editor (a post box, a comment box) takes text
-      // as if it were typed.
-      if (!document.execCommand("insertText", false, TEXT)) el.textContent = TEXT;
+      getSelection().selectAllChildren(el);
+      return JSON.stringify({ editable: true });
     } else {
       return JSON.stringify({ error: "that isn't something to type into" });
     }
