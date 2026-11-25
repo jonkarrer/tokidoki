@@ -49,8 +49,25 @@ export type UpdateStatus =
   | { state: "ready" | "installing"; version: string }
   | { state: "failed"; message: string };
 
+/** A site the user signs in to, for missions that need to be signed in (src-tauri/src/passport.rs). */
+export type Account = {
+  /** The site, as a bare host (`amazon.com`): also what names the account. */
+  site: string;
+  name: string;
+  sign_in_url: string;
+  /** The browser holds cookies from the site: it has been there. */
+  visited: boolean;
+};
+export type AccountDraft = { site: string; name: string; sign_in_url: string };
+
 /** A provider the user can choose (src-tauri/src/lib.rs). */
-export type ProviderChoice = { id: string; name: string; keys_at: string; model: string; has_key: boolean };
+export type ProviderChoice = {
+  id: string;
+  name: string;
+  keys_at: string;
+  model: string;
+  has_key: boolean;
+};
 export type Chosen = {
   provider: string;
   model: string | null;
@@ -67,7 +84,12 @@ export const core = {
   choose: (provider: string, key: string | null, model: string | null, jevKey: string | null, exaKey: string | null) =>
     invoke<Status>("choose", { provider, key, model, jevKey, exaKey }),
   send: (text: string, thread: string | null) =>
-    invoke<Sent>("send", { text, thread, steer: false, requestId: crypto.randomUUID() }),
+    invoke<Sent>("send", {
+      text,
+      thread,
+      steer: false,
+      requestId: crypto.randomUUID(),
+    }),
   threads: () => invoke<ThreadSummary[]>("threads"),
   history: (thread: string, since: number) => invoke<Checkpoint[]>("history", { thread, since }),
   /** Every thread's last `turns` turns that started before `before` (ms), as one conversation. */
@@ -97,6 +119,11 @@ export const core = {
   speak: (text: string, language: string) => invoke<ArrayBuffer>("speak", { text, language }),
   onEvent: (handler: (event: CoreEvent) => void) => listen<CoreEvent>("tokidoki:event", (e) => handler(e.payload)),
 
+  passport: () => invoke<Account[]>("passport"),
+  saveAccount: (draft: AccountDraft) => invoke<void>("save_account", { draft }),
+  deleteAccount: (site: string) => invoke<void>("delete_account", { site }),
+  /** Opens the browser's window at the account's sign-in page, for the user to sign in. */
+  signInAccount: (site: string) => invoke<void>("sign_in_account", { site }),
   version: () => invoke<string>("app_version"),
   updateStatus: () => invoke<UpdateStatus>("update_status"),
   checkForUpdates: () => invoke<void>("check_for_updates"),

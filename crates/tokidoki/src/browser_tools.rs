@@ -5,9 +5,13 @@
 //!
 //! What must not happen without the user is refused here, in code, where the model can't
 //! talk its way past it: clicking something that buys, pays, commits an order or deletes an
-//! account, and typing into a password or card field. Asking the user and going on when
-//! they say yes comes next (approvals); until then such a step stops the mission, which
-//! says what is left for the user to do.
+//! account, and typing into a card field. Asking the user and going on when they say yes
+//! comes next (approvals); until then such a step stops the mission, which says what is
+//! left for the user to do.
+//!
+//! A password is never typed, with or without a say-so: tokidoki holds none. The user signs
+//! in to a site themselves, in this browser (the app's Passport), and a mission finds
+//! itself signed in or says that it isn't.
 //!
 //! There is one page. Two missions at once would take turns on it, each finding the other's
 //! page: the conversation is told to send one browsing job at a time.
@@ -24,9 +28,10 @@ address, then act on the numbered elements in each result with browser_click and
 browser_type (submit: true presses Enter after). Element numbers change with every result: \
 always use the latest. Read again with browser_read if a page looks unfinished. Prefer a \
 site's own search box to guessing addresses, and check the page after each step before the \
-next. If a site wants a login, a code or a CAPTCHA, stop: say in your report that the user \
-needs to sign in to that site, and what is left to do once they have. Never ask for or guess \
-a password. Some steps are refused because they need the user's say-so (buying, paying, \
+next. You are signed in wherever the user has signed in to this browser themselves; you \
+never sign in. If a site wants a login, a code or a CAPTCHA, stop: say in your report that \
+the user needs to sign in to that site (Passport, in the app), and what is left to do once \
+they have. Never ask for, guess or type a password. Some steps are refused because they need the user's say-so (buying, paying, \
 placing an order, deleting an account, typing into a password or card field): when one is, \
 stop there, don't look for another way, and report what you got ready (the cart, the draft) \
 and the one step left for the user.";
@@ -181,8 +186,21 @@ impl Tool for Type {
         Box::pin(async move {
             let (number, element) = named(&self.0, &call.arguments).await?;
             if element.sensitive {
+                // A sensitive field is a card's by its words; any other is a password's.
+                let name = element.name.to_lowercase();
+                let card = ["card", "cvv", "cvc", "security code", "expir"]
+                    .iter()
+                    .any(|word| name.contains(word));
+                if !card {
+                    bail!(
+                        "Not done: a password is never typed. The user signs in to sites \
+                         themselves. Stop and report that they need to sign in to {} \
+                         (Passport, in the app).",
+                        site(&self.0).await
+                    );
+                }
                 bail!(refused(&format!(
-                    "typing into “{}” (a password or card field) on {}",
+                    "typing into “{}” (a card field) on {}",
                     element.name,
                     site(&self.0).await
                 )));

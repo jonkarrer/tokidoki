@@ -6,6 +6,7 @@
   import Keys from "./lib/Keys.svelte";
   import Memory from "./lib/Memory.svelte";
   import Notes from "./lib/Notes.svelte";
+  import Passport from "./lib/Passport.svelte";
   import Missions from "./lib/Missions.svelte";
   import Research from "./lib/Research.svelte";
   import Presence from "./lib/Presence.svelte";
@@ -97,6 +98,11 @@
         <span>Missions</span>
         <span class="count">{missions || ""}</span>
       </button>
+      <button class="place passport" class:on={app.view === "passport"} onclick={() => show("passport")}>
+        <span class="mark"><span class="pass"></span></span>
+        <span>Passport</span>
+        <span class="count"></span>
+      </button>
       <footer>
         <UpdateCard />
         <div class="foot">
@@ -119,6 +125,8 @@
         <Memory />
       {:else if app.view === "notes"}
         <Notes />
+      {:else if app.view === "passport"}
+        <Passport />
       {:else if app.view === "missions"}
         <Missions />
       {:else if app.view === "research"}
@@ -246,6 +254,14 @@
     border-left: 1.5px solid var(--indigo);
     background: linear-gradient(var(--indigo), var(--indigo)) top right / 6px 5px no-repeat;
     border-radius: 0 1px 1px 0;
+  }
+  /* Passport: a small booklet, its spine on the left. */
+  .pass {
+    width: 8px;
+    height: 10px;
+    border: 1.5px solid var(--indigo);
+    border-left-width: 3px;
+    border-radius: 1px 2px 2px 1px;
   }
   .count {
     color: var(--muted);

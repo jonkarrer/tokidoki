@@ -55,8 +55,17 @@ impl Page {
     }
 
     fn window(&self) -> Result<WebviewWindow> {
+        self.window_shown(true)
+    }
+
+    /// The window, made if there isn't one: shown, or kept out of sight (for asking it what
+    /// it holds without putting it in front of the user).
+    fn window_shown(&self, shown: bool) -> Result<WebviewWindow> {
         let _making = self.making.lock().unwrap();
         if let Some(window) = self.app.get_webview_window(WINDOW) {
+            if !shown {
+                return Ok(window);
+            }
             // Put away when the last mission ended: back for this one. Not when the user
             // closed it themselves meanwhile: then it stays closed until they ask for it.
             if AWAY.swap(false, Ordering::AcqRel) {
@@ -75,6 +84,7 @@ impl Page {
             .data_store_identifier(store)
             .user_agent(USER_AGENT)
             .focused(false)
+            .visible(shown)
             .build()
             .context("the browser window couldn't be opened")
     }
@@ -107,10 +117,28 @@ impl Engine for Page {
     }
 }
 
-/// Brings the browser window forward, for the user to look or sign in.
-#[tauri::command]
-pub fn show_browser(app: AppHandle) -> Result<(), String> {
-    let window = Page::new(app).window().map_err(|e| format!("{e:#}"))?;
-    window.show().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())
+/// Brings the browser window forward at `url`, for the user to sign in to a site themselves.
+pub fn show_at(app: &AppHandle, url: &str) -> Result<()> {
+    let window = Page::new(app.clone()).window()?;
+    window.navigate(
+        url.parse()
+            .with_context(|| format!("{url} isn't an address"))?,
+    )?;
+    window.show()?;
+    Ok(window.set_focus()?)
+}
+
+/// Whether the browser holds cookies from `site`: something is kept from a visit there. Not
+/// proof of being signed in (a site hands a cookie to anyone, and can end a session any
+/// time), only that it isn't a stranger.
+pub fn has_cookies(app: &AppHandle, site: &str) -> bool {
+    let Ok(window) = Page::new(app.clone()).window_shown(false) else {
+        return false;
+    };
+    let Ok(url) = format!("https://{site}/").parse() else {
+        return false;
+    };
+    window
+        .cookies_for_url(url)
+        .is_ok_and(|cookies| !cookies.is_empty())
 }

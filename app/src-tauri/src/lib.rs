@@ -12,6 +12,7 @@
 mod browser;
 mod debug;
 mod keys;
+mod passport;
 mod settings;
 mod updater;
 
@@ -585,7 +586,10 @@ pub fn run() {
             warm_voice,
             listen,
             speak,
-            browser::show_browser,
+            passport::passport,
+            passport::save_account,
+            passport::delete_account,
+            passport::sign_in_account,
             debug::debug_browser,
             updater::update_status,
             updater::check_for_updates,

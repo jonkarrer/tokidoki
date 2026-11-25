@@ -160,6 +160,21 @@ impl Element {
     }
 }
 
+/// Whether `host` is `site` or under it.
+pub fn on_site(host: &str, site: &str) -> bool {
+    let (host, site) = (host.to_lowercase(), site.to_lowercase());
+    !site.is_empty() && (host == site || host.ends_with(&format!(".{site}")))
+}
+
+/// The host of an address: `https://www.shop.example/cart` is on `www.shop.example`.
+pub fn host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let host = rest.split(['/', '?', '#']).next()?;
+    // Past any `user@`, before any `:port`.
+    let host = host.rsplit('@').next()?.split(':').next()?;
+    (!host.is_empty()).then_some(host)
+}
+
 /// How long a page may take to load.
 const LOAD: Duration = Duration::from_secs(20);
 /// After it has loaded, how long it may keep changing before it is read anyway.
@@ -435,6 +450,24 @@ mod tests {
         *fake.acts.lock().unwrap() = r#"{"gone":true}"#.into();
         let gone = browser.click(2).await.unwrap_err().to_string();
         assert!(gone.contains("is gone"), "{gone}");
+    }
+
+    #[test]
+    fn a_site_is_its_host_and_what_is_under_it() {
+        assert_eq!(
+            host("https://www.shop.example/cart?x=1"),
+            Some("www.shop.example")
+        );
+        assert_eq!(host("http://localhost:1431/shop.html"), Some("localhost"));
+        assert_eq!(
+            host("https://shop.example@evil.example/"),
+            Some("evil.example")
+        );
+        assert!(on_site("www.shop.example", "shop.example"));
+        assert!(on_site("Shop.Example", "shop.example"));
+        assert!(!on_site("notshop.example", "shop.example"));
+        assert!(!on_site("shop.example.evil.example", "shop.example"));
+        assert!(!on_site("shop.example", ""));
     }
 
     #[test]
