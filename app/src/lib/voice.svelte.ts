@@ -220,9 +220,15 @@ function play(wav: ArrayBuffer, token: number) {
       done();
     };
     audio.onended = end;
-    audio.onerror = end;
+    // Said, not swallowed: a reply that silently isn't read looks like voice being broken.
+    const failed = (problem: unknown) => {
+      if (token === playing.token)
+        voice.error = `Couldn't play the reply: ${audio.error?.message || (problem instanceof Error ? problem.message : "the sound didn't load")}`;
+      end();
+    };
+    audio.onerror = failed;
     audio.onpause = end;
-    audio.play().catch(end);
+    audio.play().catch(failed);
   });
 }
 

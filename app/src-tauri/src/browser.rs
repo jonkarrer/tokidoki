@@ -29,13 +29,15 @@ const DEV_STORE: [u8; 16] = *b"tokidoki-dev-web";
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
                           (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 
-/// The window was put away because no mission was out (`put_away`).
-static AWAY: AtomicBool = AtomicBool::new(false);
+/// A mission is browsing and the window was shown for it. Until then the window may exist
+/// out of sight (made to ask what it holds, or closed by the user after signing in), so
+/// the first step of a mission brings it out whatever became of it before.
+static OUT: AtomicBool = AtomicBool::new(false);
 
 /// Hides the window, if there is one, until a mission next browses.
 pub fn put_away(app: &AppHandle) {
+    OUT.store(false, Ordering::Release);
     if let Some(window) = app.get_webview_window(WINDOW) {
-        AWAY.store(true, Ordering::Release);
         let _ = window.hide();
     }
 }
@@ -66,12 +68,15 @@ impl Page {
             if !shown {
                 return Ok(window);
             }
-            // Put away when the last mission ended: back for this one. Not when the user
-            // closed it themselves meanwhile: then it stays closed until they ask for it.
-            if AWAY.swap(false, Ordering::AcqRel) {
+            // Brought out once for a mission. If the user closes it while the mission is
+            // still out, it stays closed until the next one.
+            if !OUT.swap(true, Ordering::AcqRel) {
                 let _ = window.show();
             }
             return Ok(window);
+        }
+        if shown {
+            OUT.store(true, Ordering::Release);
         }
         let blank = WebviewUrl::External("about:blank".parse()?);
         let store = match cfg!(debug_assertions) {
@@ -119,7 +124,8 @@ impl Engine for Page {
 
 /// Brings the browser window forward at `url`, for the user to sign in to a site themselves.
 pub fn show_at(app: &AppHandle, url: &str) -> Result<()> {
-    let window = Page::new(app.clone()).window()?;
+    // Not as a mission would: closing it after signing in mustn't keep it from the next one.
+    let window = Page::new(app.clone()).window_shown(false)?;
     window.navigate(
         url.parse()
             .with_context(|| format!("{url} isn't an address"))?,
