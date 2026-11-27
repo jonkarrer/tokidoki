@@ -471,6 +471,27 @@ pub enum Delivery {
     Held,
 }
 
+/// Calls of one kind, in one hour, for one thread: a line of what was used.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Usage {
+    /// When: the start of the hour, ms since the epoch.
+    pub at: u64,
+    /// The thread the calls were made for (a worker's is its mission), when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    /// What answered: a model provider (`Anthropic`, `Fireworks`, `Baseten`), `jev`, `exa`
+    /// (the tools that search and read the web through it), or `tools` (every other tool,
+    /// run on this Mac).
+    pub service: String,
+    /// The model; for a tool, its name.
+    pub model: String,
+    pub calls: u64,
+    /// Tokens sent and received; none for a tool, which is counted in calls.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 /// Where the voice models stand: one to listen (speech to text), one to speak. Both run on
 /// this Mac, downloaded once on first use.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

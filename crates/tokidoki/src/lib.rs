@@ -755,6 +755,27 @@ impl Tokidoki {
         Ok(())
     }
 
+    /// What was used since `since` (ms since the epoch): the calls to the model and to Jev,
+    /// and the tools run, that the journal holds, by hour, thread and what answered. Empty
+    /// when nothing is recorded (`Config::journal`).
+    pub fn usage(&self, since: u64) -> Result<Vec<interface::Usage>> {
+        let Some(recording) = &self.inner.journal else {
+            return Ok(Vec::new());
+        };
+        let used = recording.journal.usage(since.saturating_mul(1_000))?;
+        Ok((used.into_iter())
+            .map(|used| interface::Usage {
+                at: used.hour * 3_600_000,
+                thread: used.thread,
+                service: used.service,
+                model: used.model,
+                calls: used.calls,
+                input_tokens: used.input_tokens,
+                output_tokens: used.output_tokens,
+            })
+            .collect())
+    }
+
     /// Every worker there has been, latest first: what it was asked, how it is doing, what it
     /// found.
     pub fn workers(&self, from: &Speaker) -> Result<Vec<interface::Worker>> {

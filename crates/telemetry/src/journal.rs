@@ -117,6 +117,23 @@ struct Written {
     bodies: Vec<(String, String)>,
 }
 
+/// Calls of one kind, in one hour, for one thread: a line of `Journal::usage`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Used {
+    /// Hours since the epoch.
+    pub hour: u64,
+    /// The thread the calls were made for, when they were made for one.
+    pub thread: Option<String>,
+    /// What answered: a model provider (`Anthropic`, …), `jev`, `exa` (the tools that
+    /// search and read the web through it), or `tools` (every other tool, run on this Mac).
+    pub service: String,
+    /// The model; for a tool, its name.
+    pub model: String,
+    pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 /// Cheap to clone; clones share the file and its writer.
 #[derive(Clone)]
 pub struct Journal {
@@ -321,6 +338,48 @@ impl Journal {
         Ok(entries)
     }
 
+    /// What was used since `since` (µs since the epoch): every call to a model and to Jev,
+    /// and every tool run, that the journal holds, added up by the hour it was made in, the
+    /// thread it was made for, and what answered. Calls answered from a recording aren't
+    /// counted: nothing was sent.
+    pub fn usage(&self, since: u64) -> Result<Vec<Used>> {
+        let conn = self.lock();
+        let mut select = conn.prepare_cached(
+            "SELECT at_us / 3600000000, thread,
+                    CASE WHEN message = 'model call'
+                              THEN COALESCE(json_extract(fields, '$.provider'), 'model')
+                         WHEN message = 'tool call' THEN
+                              CASE WHEN json_extract(fields, '$.tool') IN ('web_search', 'read_page')
+                                   THEN 'exa' ELSE 'tools' END
+                         ELSE 'jev' END,
+                    COALESCE(json_extract(fields, '$.model'), json_extract(fields, '$.tool'), ''),
+                    COUNT(*),
+                    SUM(COALESCE(json_extract(fields, '$.input_tokens'), 0)),
+                    SUM(COALESCE(json_extract(fields, '$.output_tokens'), 0))
+             FROM entries
+             WHERE at_us >= ?1
+               AND (json_extract(fields, '$.input_tokens') IS NOT NULL
+                    OR (message = 'tool call' AND json_extract(fields, '$.tool') IS NOT NULL))
+               AND COALESCE(json_extract(fields, '$.replayed'), 0) IN (0, 'false')
+             GROUP BY 1, 2, 3, 4
+             ORDER BY 1, 2, 3, 4",
+        )?;
+        let mut rows = select.query([since as i64])?;
+        let mut used = Vec::new();
+        while let Some(row) = rows.next()? {
+            used.push(Used {
+                hour: row.get::<_, i64>(0)? as u64,
+                thread: row.get(1)?,
+                service: row.get(2)?,
+                model: row.get(3)?,
+                calls: row.get::<_, i64>(4)? as u64,
+                input_tokens: row.get::<_, i64>(5)? as u64,
+                output_tokens: row.get::<_, i64>(6)? as u64,
+            });
+        }
+        Ok(used)
+    }
+
     /// Deletes entries older than `before` (µs since the epoch). Returns how many.
     pub fn prune(&self, before: u64) -> Result<usize> {
         let conn = self.lock();
@@ -483,6 +542,70 @@ mod tests {
             message: message.into(),
             fields: fields.as_object().cloned().unwrap_or_default(),
         }
+    }
+
+    #[test]
+    fn usage_adds_up_calls_by_hour_thread_and_what_answered() {
+        let journal = Journal::in_memory().unwrap();
+        let model = json!({ "provider": "anthropic", "model": "haiku", "input_tokens": 100, "output_tokens": 10 });
+        journal
+            .append(&entry("model call", "t1", model.clone()))
+            .unwrap();
+        journal
+            .append(&entry("model call", "t1", model.clone()))
+            .unwrap();
+        journal
+            .append(&entry("model call", "worker-1", model))
+            .unwrap();
+        // A call answered from a recording sent nothing.
+        let replayed = json!({ "provider": "anthropic", "model": "haiku", "input_tokens": 100, "output_tokens": 10, "replayed": true });
+        journal
+            .append(&entry("model call", "t1", replayed))
+            .unwrap();
+        let judged = json!({ "model": "jev-1", "input_tokens": 40 });
+        journal.append(&entry("jev judged", "t1", judged)).unwrap();
+        journal
+            .append(&entry(
+                "tool call",
+                "worker-1",
+                json!({ "tool": "web_search" }),
+            ))
+            .unwrap();
+        journal
+            .append(&entry(
+                "tool call",
+                "worker-1",
+                json!({ "tool": "save_note" }),
+            ))
+            .unwrap();
+        journal
+            .append(&entry("task state", "t1", json!({})))
+            .unwrap();
+
+        let used = journal.usage(0).unwrap();
+        let lines: Vec<_> = (used.iter())
+            .map(|u| {
+                (
+                    u.thread.as_deref(),
+                    u.service.as_str(),
+                    u.model.as_str(),
+                    u.calls,
+                    u.input_tokens,
+                    u.output_tokens,
+                )
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (Some("t1"), "anthropic", "haiku", 2, 200, 20),
+                (Some("t1"), "jev", "jev-1", 1, 40, 0),
+                (Some("worker-1"), "anthropic", "haiku", 1, 100, 10),
+                (Some("worker-1"), "exa", "web_search", 1, 0, 0),
+                (Some("worker-1"), "tools", "save_note", 1, 0, 0),
+            ]
+        );
+        assert!(journal.usage(u64::MAX / 2).unwrap().is_empty());
     }
 
     #[test]

@@ -13,6 +13,7 @@ import type {
   Sent,
   Submission,
   ThreadSummary,
+  Usage,
   VoiceStatus,
   Heard,
   Worker,
@@ -33,6 +34,7 @@ export type {
   Submission,
   ThreadPhase,
   ThreadSummary,
+  Usage,
   VoiceStatus,
   Heard,
   Worker,
@@ -107,6 +109,8 @@ export const core = {
   /** Every worker there has been, latest first. */
   workers: () => invoke<Worker[]>("workers"),
   cancelWorker: (id: string) => invoke<boolean>("cancel_worker", { id }),
+  /** What was used since `since` (ms since the epoch): calls and tokens by hour, thread and service. */
+  usage: (since: number) => invoke<Usage[]>("usage", { since }),
   /** Where the voice models stand; `null` when there is no voice. */
   voiceStatus: () => invoke<VoiceStatus | null>("voice_status"),
   /** Downloads the voice models; progress comes as `voice` events. */

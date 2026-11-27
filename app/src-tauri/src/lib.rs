@@ -24,7 +24,7 @@ use tauri::menu::{Menu, MenuItem, MenuItemKind};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
 use tokidoki::interface::{
     Event, Feedback, Heard, Input, Memory, Note, NoteDraft, NoteSearch, Sent, Speaker,
-    ThreadSummary, VoiceStatus, WhenBusy, Worker,
+    ThreadSummary, Usage, VoiceStatus, WhenBusy, Worker,
 };
 use tokidoki::{Config, Tokidoki, Tools, Vendor};
 
@@ -373,6 +373,12 @@ fn threads(app: AppHandle) -> Said<Vec<ThreadSummary>> {
     core(&app)?.threads().map_err(say)
 }
 
+/// What was used since `since` (ms since the epoch), by hour, thread and what answered.
+#[tauri::command]
+fn usage(app: AppHandle, since: u64) -> Said<Vec<Usage>> {
+    core(&app)?.usage(since).map_err(say)
+}
+
 #[tauri::command]
 fn history(app: AppHandle, thread: String, since: usize) -> Said<Vec<Event>> {
     core(&app)?.history(&thread, since).map_err(say)
@@ -582,6 +588,7 @@ pub fn run() {
             delete_note,
             workers,
             cancel_worker,
+            usage,
             voice_status,
             prepare_voice,
             warm_voice,

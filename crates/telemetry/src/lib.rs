@@ -21,7 +21,7 @@ mod layer;
 pub mod replay;
 pub mod time;
 
-pub use journal::{Entry, Filter, Journal, Severity};
+pub use journal::{Entry, Filter, Journal, Severity, Used};
 use layer::JournalLayer;
 
 use std::path::{Path, PathBuf};

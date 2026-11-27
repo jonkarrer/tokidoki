@@ -367,7 +367,9 @@ impl Task for Report {
                 // it. A crash here loses the lesson, not the work.
                 if let (Some(lessons), Some(did)) = (self.lessons.clone(), did) {
                     let worker = worker.clone();
-                    tokio::spawn(async move { lessons.learn(&worker, &did).await });
+                    // In this span, so what it costs and does is in the journal too.
+                    let learning = async move { lessons.learn(&worker, &did).await };
+                    tokio::spawn(tracing::Instrument::in_current_span(learning));
                 }
                 match (still_there, &self.review) {
                     (true, _) => true,

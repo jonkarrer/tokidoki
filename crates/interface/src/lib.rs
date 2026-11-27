@@ -81,6 +81,7 @@ mod tests {
             decl::<NoteDraft>(),
             decl::<NoteSearch>(),
             decl::<NoteChange>(),
+            decl::<Usage>(),
             decl::<Worker>(),
             decl::<WorkerStatus>(),
             decl::<Delivery>(),

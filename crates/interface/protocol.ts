@@ -179,6 +179,33 @@ export type NoteSearch = { query: string, tag: string | null, project: string | 
 export type NoteChange = { "kind": "saved", note: Note, } | { "kind": "deleted", id: number, };
 
 /**
+ * Calls of one kind, in one hour, for one thread: a line of what was used.
+ */
+export type Usage = { 
+/**
+ * When: the start of the hour, ms since the epoch.
+ */
+at: number, 
+/**
+ * The thread the calls were made for (a worker's is its mission), when there was one.
+ */
+thread?: string | null, 
+/**
+ * What answered: a model provider (`Anthropic`, `Fireworks`, `Baseten`), `jev`, `exa`
+ * (the tools that search and read the web through it), or `tools` (every other tool,
+ * run on this Mac).
+ */
+service: string, 
+/**
+ * The model; for a tool, its name.
+ */
+model: string, calls: number, 
+/**
+ * Tokens sent and received; none for a tool, which is counted in calls.
+ */
+input_tokens: number, output_tokens: number, };
+
+/**
  * Work the model handed to a worker, which runs on its own and reports back.
  */
 export type Worker = { 

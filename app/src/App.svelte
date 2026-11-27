@@ -2,6 +2,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import { core } from "./lib/core";
+  import Account from "./lib/Account.svelte";
   import Conversation from "./lib/Conversation.svelte";
   import Keys from "./lib/Keys.svelte";
   import Memory from "./lib/Memory.svelte";
@@ -10,7 +11,6 @@
   import Missions from "./lib/Missions.svelte";
   import Research from "./lib/Research.svelte";
   import Presence from "./lib/Presence.svelte";
-  import Threads from "./lib/Threads.svelte";
   import UpdateCard from "./lib/UpdateCard.svelte";
   import { answering, app, hasHistory, show, start } from "./lib/state.svelte";
   import { startVoice } from "./lib/voice.svelte";
@@ -38,6 +38,8 @@
 
   // Research: whether a worker is looking into something now, and how many reports there are.
   const looking = $derived(app.workers.some((w) => w.kind === "research" && w.status === "running"));
+  // Account, at the foot of the sidebar: what was spent, the model and keys, the threads.
+  const account = $derived(app.view === "usage" || app.view === "keys" || app.view === "threads");
   // Missions: whether a worker is out on one now, and how many there have been.
   const out = $derived(app.workers.some((w) => w.kind !== "research" && w.status === "running"));
   const missions = $derived(app.workers.filter((w) => w.kind !== "research").length);
@@ -106,21 +108,14 @@
       <footer>
         <UpdateCard />
         <div class="foot">
-          <button class:on={app.view === "threads"} onclick={() => show("threads")}>Threads</button>
-          <button onclick={() => show("keys")}>Model and key</button>
+          <button class:on={account} onclick={() => show("usage")}>Account</button>
           <button onclick={() => core.checkForUpdates()} title="Check for updates">v{version}</button>
         </div>
       </footer>
     </nav>
     <main>
-      {#if app.view === "keys"}
-        <div class="center"><Keys
-            ondone={async () => {
-              await start();
-              show("conversation");
-            }}
-            oncancel={app.status.state === "ready" ? () => show("conversation") : undefined}
-          /></div>
+      {#if account}
+        <Account ondone={start} />
       {:else if app.view === "memory"}
         <Memory />
       {:else if app.view === "notes"}
@@ -131,8 +126,6 @@
         <Missions />
       {:else if app.view === "research"}
         <Research />
-      {:else if app.view === "threads"}
-        <Threads />
       {:else}
         <Conversation />
       {/if}

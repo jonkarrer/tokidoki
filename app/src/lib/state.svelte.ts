@@ -30,7 +30,7 @@ export const app = $state({
   status: null as Status | null,
   /** What the main area shows. */
   view: "conversation" as
-    "conversation" | "memory" | "notes" | "research" | "missions" | "passport" | "threads" | "keys",
+    "conversation" | "memory" | "notes" | "research" | "missions" | "passport" | "usage" | "threads" | "keys",
   /** The threads under the conversation, most recently active first. */
   threads: [] as ThreadSummary[],
   /** The thread the Threads view shows. */
