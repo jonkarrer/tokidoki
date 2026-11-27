@@ -3,7 +3,7 @@ name = "tokidoki-app"
 description = "Tokidoki, the app"
 edition.workspace = true
 # The app's own version, bumped by scripts/release.sh; the crates keep the workspace's.
-version = "0.2.4"
+version = "0.2.5"
 license.workspace = true
 
 [lib]
